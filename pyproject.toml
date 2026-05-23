@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Minimal, auditable, read-only MCP server exposing a Charles Schwab brokerage account to Claude Code."
 readme = "README.md"
 authors = [
-    { name = "dylancm4", email = "dylan.christopher.miller@gmail.com" }
+    { name = "dylancm4", email = "dylancm4@users.noreply.github.com" }
 ]
 requires-python = ">=3.14"
 dependencies = [

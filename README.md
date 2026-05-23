@@ -56,7 +56,7 @@ A guardrail test in `tests/test_server.py` asserts this set exactly, and that no
 
 ## Install (once complete)
 
-Requires Python 3.14 and [`uv`](https://docs.astral.sh/uv/).
+Requires Python 3.14 and [`uv`](https://docs.astral.sh/uv/). (3.14 was the current stable when this project was bootstrapped; no 3.14-specific language features are used, so the floor can be lowered if needed.)
 
 ```bash
 git clone https://github.com/dylancm4/schwab-readonly-mcp.git
