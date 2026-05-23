@@ -10,9 +10,12 @@ Please do not file public issues for security-sensitive findings.
 
 ## In scope
 
-- Bugs in `auth.py`, `client.py`, or `server.py` that could leak OAuth tokens, account data, or transaction history outside the local MCP stdio channel.
+This project is still in bootstrap (see the [README](README.md)) — the modules listed below will land in subsequent commits. The scope is forward-looking:
+
+- Bugs in `auth.py`, `client.py`, or `server.py` (when those files land) that could leak OAuth tokens, account data, or transaction history outside the local MCP stdio channel.
 - Bugs that allow a write/mutation against the Schwab API despite the documented read-only guarantees.
 - Dependency vulnerabilities not already addressed by the pinned versions in `uv.lock`.
+- Configuration or packaging issues in the current scaffolding (`.gitignore` gaps, `pyproject.toml` misconfiguration, etc.) that could leak secrets when the upcoming modules run.
 
 ## Out of scope
 
