@@ -16,7 +16,7 @@ This is a personal-use tool. The author makes no warranty as to its correctness 
 
 This server is structured so that three properties are mechanically verifiable, not just claimed:
 
-1. **Read-only at the source level.** No `httpx.post`, `httpx.put`, `httpx.delete`, or `httpx.patch` calls anywhere in `src/`. Verified by `grep`. There is no code path that can place, cancel, or modify an order.
+1. **Read-only against Schwab.** No `httpx.post`, `httpx.put`, `httpx.delete`, or `httpx.patch` calls in `src/schwab_readonly_mcp/client.py` — the only module that talks to the Schwab data APIs. Verified by `grep`. There is no code path that can place, cancel, or modify an order. (`auth.py` does POST to Schwab's OAuth token endpoint to obtain and refresh access tokens; that's authentication, not account-state mutation.)
 2. **No tokens on disk.** OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep` for `open(` / `with open` in `src/schwab_readonly_mcp/auth.py`.
 3. **Pinned, hash-locked dependencies.** `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
 

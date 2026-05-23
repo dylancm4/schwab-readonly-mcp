@@ -9,12 +9,37 @@ wheels/
 # Virtual environments
 .venv
 
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
 # macOS
 .DS_Store
 
-# Secrets, certs, and local-only material
+# Logs
+*.log
+
+# Secrets, certs, tokens, and local-only material
 /private/
+private/
 .env
+.env.*
+*.env
+**/.env
 *.pem
+*.crt
+*.cer
 *.key
+*.p12
+*.pfx
+*.token
+tokens.json
 /tmp/*.pem
