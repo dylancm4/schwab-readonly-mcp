@@ -1,5 +1,6 @@
 import base64
 import dataclasses
+import pickle
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs
 
@@ -13,27 +14,27 @@ from schwab_readonly_mcp import auth
 class TestTokenSet:
     def test_fields_accessible(self):
         t = auth.TokenSet(
-            access_token="a",
-            refresh_token="r",
+            access_token=auth.Secret("a"),
+            refresh_token=auth.Secret("r"),
             access_expires_at=1234567890,
         )
-        assert t.access_token == "a"
-        assert t.refresh_token == "r"
+        assert t.access_token == auth.Secret("a")
+        assert t.refresh_token == auth.Secret("r")
         assert t.access_expires_at == 1234567890
 
     def test_frozen(self):
         t = auth.TokenSet(
-            access_token="a",
-            refresh_token="r",
+            access_token=auth.Secret("a"),
+            refresh_token=auth.Secret("r"),
             access_expires_at=1,
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
-            t.access_token = "b"
+            t.access_token = auth.Secret("b")
 
     def test_repr_redacts_tokens(self):
         t = auth.TokenSet(
-            access_token="SECRET_ACCESS",
-            refresh_token="SECRET_REFRESH",
+            access_token=auth.Secret("SECRET_ACCESS"),
+            refresh_token=auth.Secret("SECRET_REFRESH"),
             access_expires_at=1700000000,
         )
         r = repr(t)
@@ -42,12 +43,82 @@ class TestTokenSet:
         assert "<redacted>" in r
         assert "1700000000" in r  # the non-secret field is allowed
 
+    def test_dataclasses_asdict_keeps_secrets_wrapped(self):
+        t = auth.TokenSet(
+            access_token=auth.Secret("SECRET_ACCESS"),
+            refresh_token=auth.Secret("SECRET_REFRESH"),
+            access_expires_at=1700000000,
+        )
+        d = dataclasses.asdict(t)
+        assert isinstance(d["access_token"], auth.Secret)
+        assert isinstance(d["refresh_token"], auth.Secret)
+        assert "SECRET_ACCESS" not in repr(d)
+        assert "SECRET_REFRESH" not in repr(d)
+        assert "SECRET_ACCESS" not in str(d)
+        assert "SECRET_REFRESH" not in str(d)
+
+    def test_pickle_tokenset_redacts(self):
+        t = auth.TokenSet(
+            access_token=auth.Secret("SECRET_ACCESS"),
+            refresh_token=auth.Secret("SECRET_REFRESH"),
+            access_expires_at=1700000000,
+        )
+        data = pickle.dumps(t)
+        assert b"SECRET_ACCESS" not in data
+        assert b"SECRET_REFRESH" not in data
+
+
+class TestSecret:
+    def test_repr_redacts(self):
+        s = auth.Secret("SUPERSECRET")
+        assert "SUPERSECRET" not in repr(s)
+        assert "<redacted>" in repr(s)
+
+    def test_str_redacts(self):
+        s = auth.Secret("SUPERSECRET")
+        assert "SUPERSECRET" not in str(s)
+        assert str(s) == "<redacted>"
+
+    def test_format_redacts(self):
+        s = auth.Secret("SUPERSECRET")
+        assert f"{s}" == "<redacted>"
+        assert format(s) == "<redacted>"
+        assert format(s, ">20") == "<redacted>"
+
+    def test_reveal_returns_raw(self):
+        s = auth.Secret("SUPERSECRET")
+        assert s.reveal() == "SUPERSECRET"
+
+    def test_pickle_roundtrip_redacts(self):
+        s = auth.Secret("SUPERSECRET")
+        data = pickle.dumps(s)
+        assert b"SUPERSECRET" not in data
+        restored = pickle.loads(data)
+        assert isinstance(restored, auth.Secret)
+        assert restored.reveal() == "<redacted>"
+
+    def test_vars_raises_no_dict(self):
+        s = auth.Secret("SUPERSECRET")
+        with pytest.raises(TypeError):
+            vars(s)
+
+    def test_equality(self):
+        assert auth.Secret("A") == auth.Secret("A")
+        assert auth.Secret("A") != auth.Secret("B")
+        assert auth.Secret("A") != "A"
+        assert auth.Secret("A") != 1
+
+    def test_hashable(self):
+        assert hash(auth.Secret("A")) == hash(auth.Secret("A"))
+        d = {auth.Secret("A"): 1}
+        assert d[auth.Secret("A")] == 1
+
 
 class TestStoreLoadTokens:
     def test_store_writes_three_keychain_entries(self):
         t = auth.TokenSet(
-            access_token="A",
-            refresh_token="R",
+            access_token=auth.Secret("A"),
+            refresh_token=auth.Secret("R"),
             access_expires_at=1700000000,
         )
         with patch.object(auth.keyring, "set_password") as setp:
@@ -77,8 +148,8 @@ class TestStoreLoadTokens:
         with patch.object(auth.keyring, "get_password", side_effect=fake_get):
             loaded = auth.load_tokens()
         assert loaded == auth.TokenSet(
-            access_token="A",
-            refresh_token="R",
+            access_token=auth.Secret("A"),
+            refresh_token=auth.Secret("R"),
             access_expires_at=1700000000,
         )
 
@@ -130,8 +201,8 @@ class TestExchangeCodeForTokens:
             )
 
         assert result == auth.TokenSet(
-            access_token="AT",
-            refresh_token="RT",
+            access_token=auth.Secret("AT"),
+            refresh_token=auth.Secret("RT"),
             access_expires_at=1_700_000_000 + 1800,
         )
         assert route.called
@@ -142,10 +213,11 @@ class TestExchangeCodeForTokens:
         assert body["code"] == ["THECODE"]
         assert body["redirect_uri"] == ["https://127.0.0.1:8443/cb"]
 
+    @pytest.mark.parametrize("status", [400, 500, 503])
     @respx.mock
-    async def test_propagates_http_error(self):
+    async def test_propagates_http_error(self, status):
         respx.post(auth.TOKEN_URL).mock(
-            return_value=httpx.Response(400, json={"error": "invalid_request"})
+            return_value=httpx.Response(status, json={"error": "boom"})
         )
         with pytest.raises(httpx.HTTPStatusError):
             await auth.exchange_code_for_tokens(
@@ -159,6 +231,7 @@ class TestExchangeCodeForTokens:
             {"access_token": "AT", "expires_in": 1800},   # missing refresh_token
             {"access_token": "AT", "refresh_token": "RT"},  # missing expires_in
         ],
+        ids=["no_access_token", "no_refresh_token", "no_expires_in"],
     )
     @respx.mock
     async def test_raises_on_malformed_payload(self, payload):
@@ -177,7 +250,7 @@ class TestExchangeCodeForTokens:
                 headers={"content-type": "text/html"},
             )
         )
-        with pytest.raises(Exception):  # httpx wraps json.JSONDecodeError; be lenient on the exact type
+        with pytest.raises(ValueError):
             await auth.exchange_code_for_tokens(
                 "CODE", "cid", "csec", "https://127.0.0.1:8182"
             )
@@ -204,8 +277,8 @@ class TestRefreshAccessToken:
             )
 
         assert result == auth.TokenSet(
-            access_token="AT2",
-            refresh_token="RT2",
+            access_token=auth.Secret("AT2"),
+            refresh_token=auth.Secret("RT2"),
             access_expires_at=1_700_000_000 + 1800,
         )
         req = route.calls.last.request
@@ -229,8 +302,8 @@ class TestRefreshAccessToken:
                 client_secret="csec",
             )
 
-        assert result.refresh_token == "RT_OLD"
-        assert result.access_token == "AT2"
+        assert result.refresh_token == auth.Secret("RT_OLD")
+        assert result.access_token == auth.Secret("AT2")
         assert result.access_expires_at == 1_700_000_000 + 1800
 
     @respx.mock
@@ -243,13 +316,27 @@ class TestRefreshAccessToken:
             )
         )
         result = await auth.refresh_access_token("RT_OLD", "cid", "csec")
-        assert result.refresh_token == "RT_OLD"
-        assert result.access_token == "AT2"
+        assert result.refresh_token == auth.Secret("RT_OLD")
+        assert result.access_token == auth.Secret("AT2")
 
     @respx.mock
-    async def test_propagates_http_error(self):
+    async def test_reuses_input_refresh_token_when_response_has_null(self):
+        # JSON null also exercises the `or` fallback, just like empty string
         respx.post(auth.TOKEN_URL).mock(
-            return_value=httpx.Response(400, json={"error": "invalid_grant"})
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "AT2", "refresh_token": None, "expires_in": 1800},
+            )
+        )
+        result = await auth.refresh_access_token("RT_OLD", "cid", "csec")
+        assert result.refresh_token == auth.Secret("RT_OLD")
+        assert result.access_token == auth.Secret("AT2")
+
+    @pytest.mark.parametrize("status", [400, 500, 503])
+    @respx.mock
+    async def test_propagates_http_error(self, status):
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(status, json={"error": "boom"})
         )
         with pytest.raises(httpx.HTTPStatusError):
             await auth.refresh_access_token("RT", "cid", "csec")
@@ -260,6 +347,7 @@ class TestRefreshAccessToken:
             {"refresh_token": "RT", "expires_in": 1800},  # missing access_token
             {"access_token": "AT", "refresh_token": "RT"},  # missing expires_in
         ],
+        ids=["no_access_token", "no_expires_in"],
     )
     @respx.mock
     async def test_raises_on_malformed_payload(self, payload):
@@ -276,7 +364,7 @@ class TestRefreshAccessToken:
                 headers={"content-type": "text/html"},
             )
         )
-        with pytest.raises(Exception):  # httpx wraps json.JSONDecodeError; be lenient on the exact type
+        with pytest.raises(ValueError):
             await auth.refresh_access_token("RT", "cid", "csec")
 
 
@@ -285,8 +373,8 @@ class TestGetAccessToken:
 
     def _loaded(self, expires_at: int) -> auth.TokenSet:
         return auth.TokenSet(
-            access_token="OLD",
-            refresh_token="RT",
+            access_token=auth.Secret("OLD"),
+            refresh_token=auth.Secret("RT"),
             access_expires_at=expires_at,
         )
 
@@ -322,8 +410,8 @@ class TestGetAccessToken:
     async def test_refreshes_when_at_or_past_threshold(self, delta):
         loaded = self._loaded(int(self.NOW) + delta)
         refreshed = auth.TokenSet(
-            access_token="NEW",
-            refresh_token="RT2",
+            access_token=auth.Secret("NEW"),
+            refresh_token=auth.Secret("RT2"),
             access_expires_at=int(self.NOW) + 1800,
         )
         ref_mock = AsyncMock(return_value=refreshed)
