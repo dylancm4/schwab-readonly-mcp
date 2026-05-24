@@ -28,7 +28,8 @@ htmlcov/
 *.log
 
 # Secrets, certs, tokens, and local-only material
-/private/
+# `private/` (no leading slash) matches at any depth — covers both repo-root
+# `/private/` and any hypothetical nested `*/private/` directory.
 private/
 .env
 .env.*

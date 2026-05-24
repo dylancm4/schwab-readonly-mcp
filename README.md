@@ -14,11 +14,11 @@ This is a personal-use tool. The author makes no warranty as to its correctness 
 
 ## Audit promise
 
-This server is structured so that three properties are mechanically verifiable, not just claimed:
+This server is structured so that three properties are mechanically verifiable, not just claimed. Properties 1 and 2 are *forward-looking* — `client.py` and `auth.py` don't exist yet, so the grep checks against those files trivially pass on a missing target. They become meaningful checks once Stage 2 lands functional code. Property 3 is verifiable today.
 
-1. **Read-only against Schwab.** No `httpx.post`, `httpx.put`, `httpx.delete`, or `httpx.patch` calls in `src/schwab_readonly_mcp/client.py` — the only module that talks to the Schwab data APIs. Verified by `grep`. There is no code path that can place, cancel, or modify an order. (`auth.py` does POST to Schwab's OAuth token endpoint to obtain and refresh access tokens; that's authentication, not account-state mutation.)
-2. **No tokens on disk.** OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep` for `open(` / `with open` in `src/schwab_readonly_mcp/auth.py`.
-3. **Pinned, hash-locked dependencies.** `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
+1. **Read-only against Schwab** (once `client.py` lands). No `httpx.post`, `httpx.put`, `httpx.delete`, or `httpx.patch` calls in `src/schwab_readonly_mcp/client.py` — the only module that talks to the Schwab data APIs. Verified by `grep`. There is no code path that can place, cancel, or modify an order. (`auth.py` does POST to Schwab's OAuth token endpoint to obtain and refresh access tokens; that's authentication, not account-state mutation.)
+2. **No tokens on disk** (once `auth.py` lands). OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep` for `open(` / `with open` in `src/schwab_readonly_mcp/auth.py`.
+3. **Pinned, hash-locked dependencies** (verifiable now). `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
 
 Total source budget when complete: roughly 300 lines across three files. The point is that one person can read all of it in an afternoon.
 
@@ -28,7 +28,7 @@ Runtime (3):
 
 | Package | Version | Purpose |
 | --- | --- | --- |
-| [`mcp`](https://pypi.org/project/mcp/) | 1.27.1 | Anthropic's Python MCP SDK; provides the `FastMCP` server. |
+| [`mcp`](https://pypi.org/project/mcp/) | 1.27.1 | Official Python SDK for the Model Context Protocol; provides the `FastMCP` server. |
 | [`httpx`](https://pypi.org/project/httpx/) | 0.28.1 | HTTPS client for the Schwab REST API. |
 | [`keyring`](https://pypi.org/project/keyring/) | 25.7.0 | Credential store; this project targets the macOS Keychain backend specifically. |
 
@@ -54,7 +54,9 @@ Exactly five MCP tools will be exposed, all read-only:
 
 A guardrail test in `tests/test_server.py` asserts this set exactly, and that no tool name contains any case-insensitive substring from `{place, submit, cancel, order, trade, buy, sell}`.
 
-## Install (once complete)
+## Install (planned flow)
+
+> The steps in this section describe how install **will** work once functional code lands. The `uv sync --frozen` step works today, but `scripts/authorize.py` and the MCP server itself don't exist yet — see the [bootstrap notice](#schwab-readonly-mcp) at the top of this README.
 
 **Platform: macOS only.** Token storage is keyed to the macOS Keychain via the `keyring` library's `darwin` backend. The `keyring` library itself is cross-platform, but this project does not target or test on Linux or Windows; the audit-promise statement about "OAuth tokens live only in the macOS Keychain" assumes you are running on macOS. Porting would require an explicit choice of Linux/Windows backend (Secret Service, Credential Manager, etc.) and is out of scope.
 
@@ -66,7 +68,7 @@ cd schwab-readonly-mcp
 uv sync --frozen
 ```
 
-First-run OAuth (one-time, requires a Schwab Developer App in "Ready For Use" state):
+First-run OAuth (one-time, requires a Schwab Developer App in "Ready For Use" state — **not yet runnable**, ships in a later commit):
 
 ```bash
 export SCHWAB_CLIENT_ID=...
