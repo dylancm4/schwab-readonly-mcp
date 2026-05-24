@@ -30,7 +30,7 @@ Runtime (3):
 | --- | --- | --- |
 | [`mcp`](https://pypi.org/project/mcp/) | 1.27.1 | Anthropic's Python MCP SDK; provides the `FastMCP` server. |
 | [`httpx`](https://pypi.org/project/httpx/) | 0.28.1 | HTTPS client for the Schwab REST API. |
-| [`keyring`](https://pypi.org/project/keyring/) | 25.7.0 | Cross-platform credential store; uses macOS Keychain on darwin. |
+| [`keyring`](https://pypi.org/project/keyring/) | 25.7.0 | Credential store; this project targets the macOS Keychain backend specifically. |
 
 Dev (3):
 
@@ -55,6 +55,8 @@ Exactly five MCP tools will be exposed, all read-only:
 A guardrail test in `tests/test_server.py` asserts this set exactly, and that no tool name contains any case-insensitive substring from `{place, submit, cancel, order, trade, buy, sell}`.
 
 ## Install (once complete)
+
+**Platform: macOS only.** Token storage is keyed to the macOS Keychain via the `keyring` library's `darwin` backend. The `keyring` library itself is cross-platform, but this project does not target or test on Linux or Windows; the audit-promise statement about "OAuth tokens live only in the macOS Keychain" assumes you are running on macOS. Porting would require an explicit choice of Linux/Windows backend (Secret Service, Credential Manager, etc.) and is out of scope.
 
 Requires Python 3.14 and [`uv`](https://docs.astral.sh/uv/). (3.14 was the current stable when this project was bootstrapped; no 3.14-specific language features are used, so the floor can be lowered if needed.)
 
