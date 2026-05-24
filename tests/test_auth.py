@@ -10,9 +10,6 @@ import respx
 from schwab_readonly_mcp import auth
 
 
-SERVICE = "schwab-readonly-mcp"
-
-
 class TestTokenSet:
     def test_fields_accessible(self):
         t = auth.TokenSet(
@@ -33,6 +30,18 @@ class TestTokenSet:
         with pytest.raises(dataclasses.FrozenInstanceError):
             t.access_token = "b"
 
+    def test_repr_redacts_tokens(self):
+        t = auth.TokenSet(
+            access_token="SECRET_ACCESS",
+            refresh_token="SECRET_REFRESH",
+            access_expires_at=1700000000,
+        )
+        r = repr(t)
+        assert "SECRET_ACCESS" not in r
+        assert "SECRET_REFRESH" not in r
+        assert "<redacted>" in r
+        assert "1700000000" in r  # the non-secret field is allowed
+
 
 class TestStoreLoadTokens:
     def test_store_writes_three_keychain_entries(self):
@@ -43,8 +52,11 @@ class TestStoreLoadTokens:
         )
         with patch.object(auth.keyring, "set_password") as setp:
             auth.store_tokens(t)
-        calls = {c.args[1]: c.args[2] for c in setp.call_args_list}
-        assert all(c.args[0] == SERVICE for c in setp.call_args_list)
+        calls = {}
+        for call in setp.call_args_list:
+            service, key, value = call.args
+            assert service == auth.SERVICE
+            calls[key] = value
         assert calls == {
             "access_token": "A",
             "refresh_token": "R",
@@ -59,7 +71,7 @@ class TestStoreLoadTokens:
         }
 
         def fake_get(service, key):
-            assert service == SERVICE
+            assert service == auth.SERVICE
             return stored.get(key)
 
         with patch.object(auth.keyring, "get_password", side_effect=fake_get):
@@ -90,9 +102,6 @@ class TestStoreLoadTokens:
                 auth.load_tokens()
 
 
-TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
-
-
 def _expected_basic_auth(client_id: str, client_secret: str) -> str:
     raw = f"{client_id}:{client_secret}".encode()
     return "Basic " + base64.b64encode(raw).decode()
@@ -101,7 +110,7 @@ def _expected_basic_auth(client_id: str, client_secret: str) -> str:
 class TestExchangeCodeForTokens:
     @respx.mock
     async def test_returns_tokenset_and_sends_correct_request(self):
-        route = respx.post(TOKEN_URL).mock(
+        route = respx.post(auth.TOKEN_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -133,11 +142,51 @@ class TestExchangeCodeForTokens:
         assert body["code"] == ["THECODE"]
         assert body["redirect_uri"] == ["https://127.0.0.1:8443/cb"]
 
+    @respx.mock
+    async def test_propagates_http_error(self):
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(400, json={"error": "invalid_request"})
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"refresh_token": "RT", "expires_in": 1800},  # missing access_token
+            {"access_token": "AT", "expires_in": 1800},   # missing refresh_token
+            {"access_token": "AT", "refresh_token": "RT"},  # missing expires_in
+        ],
+    )
+    @respx.mock
+    async def test_raises_on_malformed_payload(self, payload):
+        respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
+        with pytest.raises(KeyError):
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
+
+    @respx.mock
+    async def test_raises_on_non_json_body(self):
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"<html>oops</html>",
+                headers={"content-type": "text/html"},
+            )
+        )
+        with pytest.raises(Exception):  # httpx wraps json.JSONDecodeError; be lenient on the exact type
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
+
 
 class TestRefreshAccessToken:
     @respx.mock
     async def test_uses_new_refresh_token_when_returned(self):
-        route = respx.post(TOKEN_URL).mock(
+        route = respx.post(auth.TOKEN_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -167,7 +216,7 @@ class TestRefreshAccessToken:
 
     @respx.mock
     async def test_reuses_input_refresh_token_when_response_omits_it(self):
-        respx.post(TOKEN_URL).mock(
+        respx.post(auth.TOKEN_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={"access_token": "AT2", "expires_in": 1800},
@@ -183,6 +232,52 @@ class TestRefreshAccessToken:
         assert result.refresh_token == "RT_OLD"
         assert result.access_token == "AT2"
         assert result.access_expires_at == 1_700_000_000 + 1800
+
+    @respx.mock
+    async def test_reuses_input_refresh_token_when_response_has_empty_string(self):
+        # Schwab "ought to omit" but the protocol cousin could send "" — must not store ""
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "AT2", "refresh_token": "", "expires_in": 1800},
+            )
+        )
+        result = await auth.refresh_access_token("RT_OLD", "cid", "csec")
+        assert result.refresh_token == "RT_OLD"
+        assert result.access_token == "AT2"
+
+    @respx.mock
+    async def test_propagates_http_error(self):
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(400, json={"error": "invalid_grant"})
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await auth.refresh_access_token("RT", "cid", "csec")
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"refresh_token": "RT", "expires_in": 1800},  # missing access_token
+            {"access_token": "AT", "refresh_token": "RT"},  # missing expires_in
+        ],
+    )
+    @respx.mock
+    async def test_raises_on_malformed_payload(self, payload):
+        respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
+        with pytest.raises(KeyError):
+            await auth.refresh_access_token("RT", "cid", "csec")
+
+    @respx.mock
+    async def test_raises_on_non_json_body(self):
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"<html>oops</html>",
+                headers={"content-type": "text/html"},
+            )
+        )
+        with pytest.raises(Exception):  # httpx wraps json.JSONDecodeError; be lenient on the exact type
+            await auth.refresh_access_token("RT", "cid", "csec")
 
 
 class TestGetAccessToken:
@@ -207,6 +302,20 @@ class TestGetAccessToken:
 
         assert result == "OLD"
         ref.assert_not_called()
+        store.assert_not_called()
+
+    async def test_does_not_refresh_at_exact_threshold(self):
+        # delta = 30 → not < 30 → no refresh
+        loaded = self._loaded(int(self.NOW) + 30)
+        with (
+            patch.object(auth, "load_tokens", return_value=loaded),
+            patch.object(auth, "refresh_access_token", new=AsyncMock()) as ref,
+            patch.object(auth, "store_tokens") as store,
+            patch.object(auth.time, "time", return_value=self.NOW),
+        ):
+            result = await auth.get_access_token("cid", "csec")
+        assert result == "OLD"
+        ref.assert_not_awaited()
         store.assert_not_called()
 
     @pytest.mark.parametrize("delta", [29, -100])

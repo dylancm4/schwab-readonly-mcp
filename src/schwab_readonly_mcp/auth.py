@@ -14,6 +14,12 @@ class TokenSet:
     refresh_token: str
     access_expires_at: int
 
+    def __repr__(self) -> str:
+        return (
+            f"TokenSet(access_token=<redacted>, refresh_token=<redacted>, "
+            f"access_expires_at={self.access_expires_at})"
+        )
+
 
 def store_tokens(tokens: TokenSet) -> None:
     keyring.set_password(SERVICE, "access_token", tokens.access_token)
@@ -26,7 +32,7 @@ def load_tokens() -> TokenSet:
     refresh = keyring.get_password(SERVICE, "refresh_token")
     expires = keyring.get_password(SERVICE, "access_expires_at")
     if access is None or refresh is None or expires is None:
-        raise RuntimeError("No tokens stored — run scripts/authorize.py first")
+        raise RuntimeError("No tokens stored: run scripts/authorize.py first")
     return TokenSet(
         access_token=access,
         refresh_token=refresh,
@@ -37,7 +43,7 @@ def load_tokens() -> TokenSet:
 async def exchange_code_for_tokens(
     code: str, client_id: str, client_secret: str, redirect_uri: str
 ) -> TokenSet:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.post(
             TOKEN_URL,
             auth=(client_id, client_secret),
@@ -59,7 +65,7 @@ async def exchange_code_for_tokens(
 async def refresh_access_token(
     refresh_token: str, client_id: str, client_secret: str
 ) -> TokenSet:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.post(
             TOKEN_URL,
             auth=(client_id, client_secret),
@@ -69,7 +75,7 @@ async def refresh_access_token(
         payload = response.json()
     return TokenSet(
         access_token=payload["access_token"],
-        refresh_token=payload.get("refresh_token", refresh_token),
+        refresh_token=payload.get("refresh_token") or refresh_token,
         access_expires_at=int(time.time()) + payload["expires_in"],
     )
 
