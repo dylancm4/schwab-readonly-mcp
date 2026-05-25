@@ -273,6 +273,8 @@ class TestExchangeCodeForTokens:
             {"access_token": "AT", "refresh_token": None, "expires_in": 1800},
             {"access_token": "AT", "refresh_token": "", "expires_in": 1800},
             {"access_token": "AT", "refresh_token": "RT", "expires_in": None},
+            {"access_token": "AT", "refresh_token": "RT", "expires_in": True},
+            {"access_token": "AT", "refresh_token": "RT", "expires_in": 0},
         ],
         ids=[
             "null_access_token",
@@ -280,13 +282,17 @@ class TestExchangeCodeForTokens:
             "null_refresh_token",
             "empty_refresh_token",
             "null_expires_in",
+            "bool_expires_in",
+            "zero_expires_in",
         ],
     )
     @respx.mock
     async def test_raises_on_null_or_empty_payload_field(self, payload):
         respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
         with pytest.raises(ValueError, match="invalid"):
-            await auth.exchange_code_for_tokens("CODE", "cid", "csec", "https://127.0.0.1:8182")
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
 
     @respx.mock
     async def test_raises_on_non_json_body(self):
@@ -409,12 +415,16 @@ class TestRefreshAccessToken:
             {"access_token": "", "refresh_token": "RT", "expires_in": 1800},
             {"access_token": "AT", "refresh_token": "RT", "expires_in": None},
             {"access_token": "AT", "refresh_token": 12345, "expires_in": 1800},
+            {"access_token": "AT", "refresh_token": "RT", "expires_in": True},
+            {"access_token": "AT", "refresh_token": "RT", "expires_in": 0},
         ],
         ids=[
             "null_access_token",
             "empty_access_token",
             "null_expires_in",
             "wrong_type_refresh_token",
+            "bool_expires_in",
+            "zero_expires_in",
         ],
     )
     @respx.mock
