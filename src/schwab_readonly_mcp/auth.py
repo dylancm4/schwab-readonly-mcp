@@ -82,10 +82,19 @@ async def exchange_code_for_tokens(
         )
         response.raise_for_status()
         payload = response.json()
+    access_token = payload.get("access_token")
+    refresh_token_value = payload.get("refresh_token")
+    expires_in = payload.get("expires_in")
+    if not isinstance(access_token, str) or not access_token:
+        raise ValueError("token endpoint returned invalid access_token")
+    if not isinstance(refresh_token_value, str) or not refresh_token_value:
+        raise ValueError("token endpoint returned invalid refresh_token")
+    if not isinstance(expires_in, int):
+        raise ValueError("token endpoint returned invalid expires_in")
     return TokenSet(
-        access_token=Secret(payload["access_token"]),
-        refresh_token=Secret(payload["refresh_token"]),
-        access_expires_at=int(time.time()) + payload["expires_in"],
+        access_token=Secret(access_token),
+        refresh_token=Secret(refresh_token_value),
+        access_expires_at=int(time.time()) + expires_in,
     )
 
 
@@ -103,11 +112,20 @@ async def refresh_access_token(
         )
         response.raise_for_status()
         payload = response.json()
-    new_rt = payload.get("refresh_token") or refresh_token
+    access_token = payload.get("access_token")
+    expires_in = payload.get("expires_in")
+    candidate_rt = payload.get("refresh_token")
+    new_rt = candidate_rt or refresh_token
+    if not isinstance(access_token, str) or not access_token:
+        raise ValueError("token endpoint returned invalid access_token")
+    if not isinstance(expires_in, int):
+        raise ValueError("token endpoint returned invalid expires_in")
+    if not isinstance(new_rt, str) or not new_rt:
+        raise ValueError("token endpoint returned invalid refresh_token")
     return TokenSet(
-        access_token=Secret(payload["access_token"]),
+        access_token=Secret(access_token),
         refresh_token=Secret(new_rt),
-        access_expires_at=int(time.time()) + payload["expires_in"],
+        access_expires_at=int(time.time()) + expires_in,
     )
 
 

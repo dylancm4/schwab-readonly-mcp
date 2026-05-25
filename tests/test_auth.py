@@ -1,4 +1,5 @@
 import base64
+import copy
 import dataclasses
 import pickle
 from unittest.mock import AsyncMock, patch
@@ -94,13 +95,11 @@ class TestSecret:
         s = auth.Secret("SUPERSECRET")
         assert s.reveal() == "SUPERSECRET"
 
+    # Pins the type-hint-only contract: Secret does NOT validate input.
+    # Adding validation must be a conscious decision.
     def test_none_is_accepted_unchanged(self):
-        # Pins the type-hint-only contract: Secret does NOT validate its input.
-        # If a future change adds isinstance(value, str) validation, this test
-        # will fail and force a conscious decision about the contract.
         s = auth.Secret(None)
         assert s.reveal() is None
-        # Even with a non-str value, every redaction surface still holds:
         assert "None" not in str(s)
         assert "None" not in repr(s)
         assert "None" not in f"{s}"
@@ -114,12 +113,11 @@ class TestSecret:
         assert restored.reveal() == "<redacted>"
 
     def test_copy_and_deepcopy_redact(self):
-        import copy
         s = auth.Secret("REAL_VALUE")
         for fn in (copy.copy, copy.deepcopy):
             c = fn(s)
             assert isinstance(c, auth.Secret)
-            assert c.reveal() == "<redacted>"  # redacted via __reduce__ fallback
+            assert c.reveal() == "<redacted>"
             assert "REAL_VALUE" not in repr(c)
             assert "REAL_VALUE" not in str(c)
 
@@ -262,10 +260,33 @@ class TestExchangeCodeForTokens:
     @respx.mock
     async def test_raises_on_malformed_payload(self, payload):
         respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError):
             await auth.exchange_code_for_tokens(
                 "CODE", "cid", "csec", "https://127.0.0.1:8182"
             )
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"access_token": None, "refresh_token": "RT", "expires_in": 1800},
+            {"access_token": "", "refresh_token": "RT", "expires_in": 1800},
+            {"access_token": "AT", "refresh_token": None, "expires_in": 1800},
+            {"access_token": "AT", "refresh_token": "", "expires_in": 1800},
+            {"access_token": "AT", "refresh_token": "RT", "expires_in": None},
+        ],
+        ids=[
+            "null_access_token",
+            "empty_access_token",
+            "null_refresh_token",
+            "empty_refresh_token",
+            "null_expires_in",
+        ],
+    )
+    @respx.mock
+    async def test_raises_on_null_or_empty_payload_field(self, payload):
+        respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
+        with pytest.raises(ValueError, match="invalid"):
+            await auth.exchange_code_for_tokens("CODE", "cid", "csec", "https://127.0.0.1:8182")
 
     @respx.mock
     async def test_raises_on_non_json_body(self):
@@ -378,8 +399,29 @@ class TestRefreshAccessToken:
     @respx.mock
     async def test_raises_on_malformed_payload(self, payload):
         respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError):
             await auth.refresh_access_token("RT", "cid", "csec")
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"access_token": None, "refresh_token": "RT", "expires_in": 1800},
+            {"access_token": "", "refresh_token": "RT", "expires_in": 1800},
+            {"access_token": "AT", "refresh_token": "RT", "expires_in": None},
+            {"access_token": "AT", "refresh_token": 12345, "expires_in": 1800},
+        ],
+        ids=[
+            "null_access_token",
+            "empty_access_token",
+            "null_expires_in",
+            "wrong_type_refresh_token",
+        ],
+    )
+    @respx.mock
+    async def test_raises_on_null_or_invalid_payload_field(self, payload):
+        respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
+        with pytest.raises(ValueError, match="invalid"):
+            await auth.refresh_access_token("RT_OLD", "cid", "csec")
 
     @respx.mock
     async def test_raises_on_non_json_body(self):
