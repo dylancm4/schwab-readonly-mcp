@@ -66,6 +66,11 @@ class TestTokenSet:
         data = pickle.dumps(t)
         assert b"SECRET_ACCESS" not in data
         assert b"SECRET_REFRESH" not in data
+        restored = pickle.loads(data)
+        assert isinstance(restored, auth.TokenSet)
+        assert restored.access_token == auth.Secret("<redacted>")
+        assert restored.refresh_token == auth.Secret("<redacted>")
+        assert restored.access_expires_at == 1700000000
 
 
 class TestSecret:
@@ -89,6 +94,17 @@ class TestSecret:
         s = auth.Secret("SUPERSECRET")
         assert s.reveal() == "SUPERSECRET"
 
+    def test_none_is_accepted_unchanged(self):
+        # Pins the type-hint-only contract: Secret does NOT validate its input.
+        # If a future change adds isinstance(value, str) validation, this test
+        # will fail and force a conscious decision about the contract.
+        s = auth.Secret(None)
+        assert s.reveal() is None
+        # Even with a non-str value, every redaction surface still holds:
+        assert "None" not in str(s)
+        assert "None" not in repr(s)
+        assert "None" not in f"{s}"
+
     def test_pickle_roundtrip_redacts(self):
         s = auth.Secret("SUPERSECRET")
         data = pickle.dumps(s)
@@ -96,6 +112,16 @@ class TestSecret:
         restored = pickle.loads(data)
         assert isinstance(restored, auth.Secret)
         assert restored.reveal() == "<redacted>"
+
+    def test_copy_and_deepcopy_redact(self):
+        import copy
+        s = auth.Secret("REAL_VALUE")
+        for fn in (copy.copy, copy.deepcopy):
+            c = fn(s)
+            assert isinstance(c, auth.Secret)
+            assert c.reveal() == "<redacted>"  # redacted via __reduce__ fallback
+            assert "REAL_VALUE" not in repr(c)
+            assert "REAL_VALUE" not in str(c)
 
     def test_vars_raises_no_dict(self):
         s = auth.Secret("SUPERSECRET")

@@ -12,7 +12,7 @@ class Secret:
     __slots__ = ("_value",)
 
     def __init__(self, value: str) -> None:
-        object.__setattr__(self, "_value", value)
+        self._value = value
 
     def reveal(self) -> str:
         return self._value
@@ -67,7 +67,10 @@ def load_tokens() -> TokenSet:
 async def exchange_code_for_tokens(
     code: str, client_id: str, client_secret: str, redirect_uri: str
 ) -> TokenSet:
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient(
+        trust_env=False,
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    ) as client:
         response = await client.post(
             TOKEN_URL,
             auth=(client_id, client_secret),
@@ -89,7 +92,10 @@ async def exchange_code_for_tokens(
 async def refresh_access_token(
     refresh_token: str, client_id: str, client_secret: str
 ) -> TokenSet:
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient(
+        trust_env=False,
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    ) as client:
         response = await client.post(
             TOKEN_URL,
             auth=(client_id, client_secret),
