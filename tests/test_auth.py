@@ -248,6 +248,9 @@ class TestExchangeCodeForTokens:
                 "CODE", "cid", "csec", "https://127.0.0.1:8182"
             )
 
+    # Kept distinct from test_raises_on_invalid_payload_field: both end at
+    # _require_str via ValueError, but document missing-key vs present-but-invalid
+    # as separate wire-shape concerns.
     @pytest.mark.parametrize(
         "payload",
         [
@@ -287,7 +290,7 @@ class TestExchangeCodeForTokens:
         ],
     )
     @respx.mock
-    async def test_raises_on_null_or_empty_payload_field(self, payload):
+    async def test_raises_on_invalid_payload_field(self, payload):
         respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
         with pytest.raises(ValueError, match="invalid"):
             await auth.exchange_code_for_tokens(
@@ -394,6 +397,9 @@ class TestRefreshAccessToken:
         with pytest.raises(httpx.HTTPStatusError):
             await auth.refresh_access_token("RT", "cid", "csec")
 
+    # Kept distinct from test_raises_on_invalid_payload_field: both end at
+    # _require_str via ValueError, but document missing-key vs present-but-invalid
+    # as separate wire-shape concerns.
     @pytest.mark.parametrize(
         "payload",
         [
@@ -428,7 +434,7 @@ class TestRefreshAccessToken:
         ],
     )
     @respx.mock
-    async def test_raises_on_null_or_invalid_payload_field(self, payload):
+    async def test_raises_on_invalid_payload_field(self, payload):
         respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=payload))
         with pytest.raises(ValueError, match="invalid"):
             await auth.refresh_access_token("RT_OLD", "cid", "csec")
