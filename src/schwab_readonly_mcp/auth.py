@@ -46,6 +46,11 @@ class TokenSet:
 
 
 def store_tokens(tokens: TokenSet) -> None:
+    # Write access_expires_at LAST. These three Keychain entries are written
+    # non-atomically; if the process dies mid-write, a missing/stale expiry makes
+    # the next load_tokens either raise "No tokens stored" (loud, safe → re-authorize)
+    # or look already-expired (→ triggers a refresh), rather than handing out a
+    # fresh access token paired with a stale expiry.
     keyring.set_password(SERVICE, "access_token", tokens.access_token.reveal())
     keyring.set_password(SERVICE, "refresh_token", tokens.refresh_token.reveal())
     keyring.set_password(SERVICE, "access_expires_at", str(tokens.access_expires_at))
