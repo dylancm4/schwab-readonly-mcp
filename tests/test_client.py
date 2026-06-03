@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import httpx
 import pytest
 import respx
@@ -40,19 +42,88 @@ class TestListAccounts:
         req = route.calls.last.request
         assert "fields" not in req.url.params
 
-    @respx.mock
-    async def test_token_not_leaked_in_repr(self):
+    async def test_token_not_leaked_in_repr_or_str(self):
         c = client.SchwabClient("SUPERSECRET")
         assert "SUPERSECRET" not in repr(c)
+        assert "SUPERSECRET" not in str(c)
+        # The teeth: if the token is stored as a raw str instead of Secret,
+        # repr of the attribute itself would expose it.
+        assert "SUPERSECRET" not in repr(c._access_token)
 
+    @pytest.mark.parametrize("status", [400, 401, 404, 500, 503])
     @respx.mock
-    async def test_propagates_http_error(self):
+    async def test_propagates_http_error(self, status):
         respx.get(ACCOUNTS_URL).mock(
-            return_value=httpx.Response(500, json={"error": "boom"})
+            return_value=httpx.Response(status, json={"error": "boom"})
         )
         c = client.SchwabClient("TOKEN")
         with pytest.raises(httpx.HTTPStatusError):
             await c.list_accounts()
+
+    @respx.mock
+    async def test_propagates_connection_error(self):
+        # _get does no catching — a transport failure must propagate loudly.
+        respx.get(ACCOUNTS_URL).mock(side_effect=httpx.ConnectError("down"))
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(httpx.ConnectError):
+            await c.list_accounts()
+
+    @respx.mock
+    async def test_propagates_timeout(self):
+        respx.get(ACCOUNTS_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(httpx.ReadTimeout):
+            await c.list_accounts()
+
+    @respx.mock
+    async def test_raises_on_non_json_body(self):
+        # A non-JSON 200 must loud-fail rather than silently return text.
+        respx.get(ACCOUNTS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"<html>oops</html>",
+                headers={"content-type": "text/html"},
+            )
+        )
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(ValueError):
+            await c.list_accounts()
+
+    @respx.mock
+    async def test_does_not_follow_redirect_to_other_endpoint(self):
+        # read-only invariant: a 3xx to a different route must NOT be followed.
+        respx.get(ACCOUNTS_URL).mock(
+            return_value=httpx.Response(
+                302, headers={"Location": f"{client.BASE_URL}/v1/oauth/token"}
+            )
+        )
+        target = respx.get(f"{client.BASE_URL}/v1/oauth/token").mock(
+            return_value=httpx.Response(200, json={"leaked": True})
+        )
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(httpx.HTTPStatusError):
+            await c.list_accounts()
+        assert target.called is False
+
+    async def test_transport_hardening_construction_contract(self):
+        # Lock the security-relevant AsyncClient kwargs against future refactors.
+        real_cls = client.httpx.AsyncClient
+        captured: dict[str, object] = {}
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return real_cls(*args, **kwargs)
+
+        with patch.object(client.httpx, "AsyncClient", side_effect=spy):
+            with respx.mock:
+                respx.get(ACCOUNTS_URL).mock(
+                    return_value=httpx.Response(200, json=[])
+                )
+                await client.SchwabClient("TOKEN").list_accounts()
+
+        assert captured["trust_env"] is False
+        assert captured["follow_redirects"] is False
+        assert isinstance(captured["timeout"], httpx.Timeout)
 
 
 class TestGetAccount:
@@ -83,6 +154,31 @@ class TestGetAccount:
         assert req.url.path == "/trader/v1/accounts/42"
         assert "fields" not in req.url.params
 
+    @respx.mock
+    async def test_accepts_alphanumeric_hash_account_number(self):
+        # Schwab's real account id is an encrypted hash; alphanumerics must pass.
+        acct = "ABC123def456"
+        route = respx.get(f"{ACCOUNTS_URL}/{acct}").mock(
+            return_value=httpx.Response(200, json={"accountNumber": acct})
+        )
+        c = client.SchwabClient("TOKEN")
+        await c.get_account(acct)
+        assert route.called
+        assert route.calls.last.request.url.path == f"/trader/v1/accounts/{acct}"
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["../../v1/oauth/token", "42?evil=1", "a/b", "a#b", "a%2e", "a\\b", "a b", ""],
+    )
+    @respx.mock
+    async def test_rejects_path_injection_account_number(self, bad):
+        # Catch-all so any leaked request would be observable, then assert none.
+        catch = respx.route().mock(return_value=httpx.Response(200, json={}))
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(ValueError, match="invalid account_number"):
+            await c.get_account(bad)
+        assert catch.called is False
+
 
 class TestGetTransactions:
     @respx.mock
@@ -104,6 +200,14 @@ class TestGetTransactions:
         assert req.url.path == "/trader/v1/accounts/42/transactions"
         assert req.url.params["startDate"] == "2024-01-01T00:00:00.000Z"
         assert req.url.params["endDate"] == "2024-03-31T23:59:59.999Z"
+
+    @respx.mock
+    async def test_rejects_path_injection_account_number(self):
+        catch = respx.route().mock(return_value=httpx.Response(200, json={}))
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(ValueError, match="invalid account_number"):
+            await c.get_transactions("a/b", "2024-01-01", "2024-03-31")
+        assert catch.called is False
 
 
 QUOTES_URL = f"{client.BASE_URL}/marketdata/v1/quotes"
