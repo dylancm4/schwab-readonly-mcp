@@ -53,27 +53,42 @@ class TestListAccounts:
     @pytest.mark.parametrize("status", [400, 401, 404, 500, 503])
     @respx.mock
     async def test_propagates_http_error(self, status):
+        # HTTP errors surface as a scrubbed RuntimeError (the live, secret-bearing
+        # httpx request must never escape) — the loud-fail contract is preserved.
         respx.get(ACCOUNTS_URL).mock(
             return_value=httpx.Response(status, json={"error": "boom"})
         )
         c = client.SchwabClient("TOKEN")
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(RuntimeError, match=r"HTTP \d+"):
             await c.list_accounts()
 
     @respx.mock
     async def test_propagates_connection_error(self):
-        # _get does no catching — a transport failure must propagate loudly.
+        # A transport failure must still propagate loudly, scrubbed to RuntimeError.
         respx.get(ACCOUNTS_URL).mock(side_effect=httpx.ConnectError("down"))
         c = client.SchwabClient("TOKEN")
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(RuntimeError):
             await c.list_accounts()
 
     @respx.mock
     async def test_propagates_timeout(self):
         respx.get(ACCOUNTS_URL).mock(side_effect=httpx.ReadTimeout("slow"))
         c = client.SchwabClient("TOKEN")
-        with pytest.raises(httpx.ReadTimeout):
+        with pytest.raises(RuntimeError):
             await c.list_accounts()
+
+    @respx.mock
+    async def test_http_error_does_not_leak_bearer_token(self):
+        # The teeth: the raised error must not carry the Bearer token that the
+        # secret-bearing request headers would expose.
+        respx.get(ACCOUNTS_URL).mock(
+            return_value=httpx.Response(401, json={"error": "boom"})
+        )
+        c = client.SchwabClient("SUPERSECRET")
+        with pytest.raises(RuntimeError) as excinfo:
+            await c.list_accounts()
+        assert "SUPERSECRET" not in str(excinfo.value)
+        assert "SUPERSECRET" not in repr(excinfo.value)
 
     @respx.mock
     async def test_raises_on_non_json_body(self):
@@ -101,7 +116,7 @@ class TestListAccounts:
             return_value=httpx.Response(200, json={"leaked": True})
         )
         c = client.SchwabClient("TOKEN")
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(RuntimeError):
             await c.list_accounts()
         assert target.called is False
 

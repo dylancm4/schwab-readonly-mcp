@@ -73,6 +73,19 @@ def load_tokens() -> TokenSet:
     )
 
 
+def scrubbed_http_error(exc: httpx.HTTPError) -> RuntimeError:
+    # The httpx exception retains the live request, whose headers carry
+    # credentials (Basic for auth, Bearer for the data client) and whose
+    # body can carry the OAuth code / refresh token. Surface only a safe
+    # summary so the secret-bearing request is never propagated to logs
+    # or a crash reporter. Reading exc.response.status_code (an int) and
+    # type(exc).__name__ is safe; never embed str(exc), the request, or the
+    # response object in the message.
+    if isinstance(exc, httpx.HTTPStatusError):
+        return RuntimeError(f"Schwab API returned HTTP {exc.response.status_code}")
+    return RuntimeError(f"Schwab API request failed: {type(exc).__name__}")
+
+
 def _require_str(payload: dict[str, object], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value:
@@ -96,16 +109,19 @@ async def exchange_code_for_tokens(
         trust_env=False,
         timeout=httpx.Timeout(10.0, connect=5.0),
     ) as client:
-        response = await client.post(
-            TOKEN_URL,
-            auth=(client_id, client_secret),
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
-        )
-        response.raise_for_status()
+        try:
+            response = await client.post(
+                TOKEN_URL,
+                auth=(client_id, client_secret),
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            raise scrubbed_http_error(e) from None
         payload = response.json()
     return TokenSet(
         access_token=Secret(_require_str(payload, "access_token")),
@@ -121,12 +137,15 @@ async def refresh_access_token(
         trust_env=False,
         timeout=httpx.Timeout(10.0, connect=5.0),
     ) as client:
-        response = await client.post(
-            TOKEN_URL,
-            auth=(client_id, client_secret),
-            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-        )
-        response.raise_for_status()
+        try:
+            response = await client.post(
+                TOKEN_URL,
+                auth=(client_id, client_secret),
+                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            raise scrubbed_http_error(e) from None
         payload = response.json()
     new_rt = payload.get("refresh_token") or refresh_token
     if not isinstance(new_rt, str) or not new_rt:

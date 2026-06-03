@@ -258,10 +258,25 @@ class TestExchangeCodeForTokens:
         respx.post(auth.TOKEN_URL).mock(
             return_value=httpx.Response(status, json={"error": "boom"})
         )
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(RuntimeError, match=r"HTTP \d+"):
             await auth.exchange_code_for_tokens(
                 "CODE", "cid", "csec", "https://127.0.0.1:8182"
             )
+
+    @respx.mock
+    async def test_http_error_does_not_leak_credentials_or_code(self):
+        # The teeth: the raised error must not carry the Basic credentials or the
+        # authorization code that the secret-bearing request would expose.
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(400, json={"error": "boom"})
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            await auth.exchange_code_for_tokens(
+                "THECODE", "cid", "SUPERSECRET", "https://127.0.0.1:8182"
+            )
+        for leaked in ("SUPERSECRET", "THECODE"):
+            assert leaked not in str(excinfo.value)
+            assert leaked not in repr(excinfo.value)
 
     # Kept distinct from test_raises_on_invalid_payload_field: both end at
     # _require_str via ValueError, but document missing-key vs present-but-invalid
@@ -409,8 +424,21 @@ class TestRefreshAccessToken:
         respx.post(auth.TOKEN_URL).mock(
             return_value=httpx.Response(status, json={"error": "boom"})
         )
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(RuntimeError, match=r"HTTP \d+"):
             await auth.refresh_access_token("RT", "cid", "csec")
+
+    @respx.mock
+    async def test_http_error_does_not_leak_credentials_or_refresh_token(self):
+        # The teeth: the raised error must not carry the Basic credentials or the
+        # refresh token that the secret-bearing request would expose.
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(400, json={"error": "boom"})
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            await auth.refresh_access_token("RT_SUPERSECRET", "cid", "CSEC_SECRET")
+        for leaked in ("RT_SUPERSECRET", "CSEC_SECRET"):
+            assert leaked not in str(excinfo.value)
+            assert leaked not in repr(excinfo.value)
 
     # Kept distinct from test_raises_on_invalid_payload_field: both end at
     # _require_str via ValueError, but document missing-key vs present-but-invalid

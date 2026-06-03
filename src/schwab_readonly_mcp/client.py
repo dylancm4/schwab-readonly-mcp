@@ -1,6 +1,6 @@
 import httpx
 
-from schwab_readonly_mcp.auth import Secret
+from schwab_readonly_mcp.auth import Secret, scrubbed_http_error
 
 BASE_URL = "https://api.schwabapi.com"
 
@@ -37,12 +37,15 @@ class SchwabClient:
             # read-only — never auto-follow a redirect to another endpoint.
             follow_redirects=False,
         ) as client:
-            response = await client.get(
-                f"{BASE_URL}{path}",
-                params=params,
-                headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
-            )
-            response.raise_for_status()
+            try:
+                response = await client.get(
+                    f"{BASE_URL}{path}",
+                    params=params,
+                    headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as e:
+                raise scrubbed_http_error(e) from None
             return response.json()
 
     async def list_accounts(self, include_positions: bool = True) -> object:
