@@ -157,6 +157,9 @@ class TestStoreLoadTokens:
             "refresh_token": "R",
             "access_expires_at": "1700000000",
         }
+        # access_expires_at MUST be written LAST (deliberate fail-safe: a partial
+        # write leaves a missing/stale expiry, never a fresh token + stale expiry).
+        assert setp.call_args_list[-1].args[1] == "access_expires_at"
 
     def test_load_round_trips(self):
         stored = {
@@ -306,9 +309,10 @@ class TestExchangeCodeForTokens:
                 assert leaked not in text
             cur = cur.__context__ or cur.__cause__
 
-    # Kept distinct from test_raises_on_invalid_payload_field: both end at
-    # _require_str via ValueError, but document missing-key vs present-but-invalid
-    # as separate wire-shape concerns.
+    # Kept distinct from test_raises_on_invalid_payload_field: both end in a
+    # ValueError from _require_str (access_token/refresh_token) or _require_int
+    # (expires_in), but document missing-key vs present-but-invalid as separate
+    # wire-shape concerns.
     @pytest.mark.parametrize(
         "payload",
         [
@@ -492,9 +496,10 @@ class TestRefreshAccessToken:
                 assert leaked not in text
             cur = cur.__context__ or cur.__cause__
 
-    # Kept distinct from test_raises_on_invalid_payload_field: both end at
-    # _require_str via ValueError, but document missing-key vs present-but-invalid
-    # as separate wire-shape concerns.
+    # Kept distinct from test_raises_on_invalid_payload_field: both end in a
+    # ValueError from _require_str (access_token/refresh_token) or _require_int
+    # (expires_in), but document missing-key vs present-but-invalid as separate
+    # wire-shape concerns.
     @pytest.mark.parametrize(
         "payload",
         [
