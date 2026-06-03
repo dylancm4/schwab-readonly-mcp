@@ -196,6 +196,21 @@ class TestStoreLoadTokens:
             with pytest.raises(RuntimeError, match="No tokens stored"):
                 auth.load_tokens()
 
+    def test_load_raises_clear_error_on_corrupt_expires_at(self):
+        stored = {
+            "access_token": "A",
+            "refresh_token": "R",
+            "access_expires_at": "not-a-number",
+        }
+
+        with patch.object(
+            auth.keyring,
+            "get_password",
+            side_effect=lambda s, k: stored.get(k),
+        ):
+            with pytest.raises(RuntimeError, match="corrupt"):
+                auth.load_tokens()
+
 
 def _expected_basic_auth(client_id: str, client_secret: str) -> str:
     raw = f"{client_id}:{client_secret}".encode()

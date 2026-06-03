@@ -62,10 +62,14 @@ def load_tokens() -> TokenSet:
     expires = keyring.get_password(SERVICE, "access_expires_at")
     if access is None or refresh is None or expires is None:
         raise RuntimeError("No tokens stored: run scripts/authorize.py first")
+    try:
+        expires_at = int(expires)
+    except ValueError:
+        raise RuntimeError("corrupt tokens: re-run scripts/authorize.py") from None
     return TokenSet(
         access_token=Secret(access),
         refresh_token=Secret(refresh),
-        access_expires_at=int(expires),
+        access_expires_at=expires_at,
     )
 
 
