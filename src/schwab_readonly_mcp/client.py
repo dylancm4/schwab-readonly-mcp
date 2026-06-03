@@ -27,3 +27,9 @@ class SchwabClient:
     async def list_accounts(self, include_positions: bool = True) -> object:
         params = {"fields": "positions"} if include_positions else None
         return await self._get("/trader/v1/accounts", params)
+
+    async def get_account(
+        self, account_number: str, include_positions: bool = True
+    ) -> object:
+        params = {"fields": "positions"} if include_positions else None
+        return await self._get(f"/trader/v1/accounts/{account_number}", params)
