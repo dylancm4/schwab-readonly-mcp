@@ -264,6 +264,22 @@ class TestExchangeCodeForTokens:
             )
 
     @respx.mock
+    async def test_propagates_connection_error(self):
+        respx.post(auth.TOKEN_URL).mock(side_effect=httpx.ConnectError("down"))
+        with pytest.raises(RuntimeError):
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
+
+    @respx.mock
+    async def test_propagates_timeout(self):
+        respx.post(auth.TOKEN_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+        with pytest.raises(RuntimeError):
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
+
+    @respx.mock
     async def test_http_error_does_not_leak_credentials_or_code(self):
         # The teeth: the raised error must not carry the Basic credentials or the
         # authorization code that the secret-bearing request would expose.
@@ -425,6 +441,18 @@ class TestRefreshAccessToken:
             return_value=httpx.Response(status, json={"error": "boom"})
         )
         with pytest.raises(RuntimeError, match=r"HTTP \d+"):
+            await auth.refresh_access_token("RT", "cid", "csec")
+
+    @respx.mock
+    async def test_propagates_connection_error(self):
+        respx.post(auth.TOKEN_URL).mock(side_effect=httpx.ConnectError("down"))
+        with pytest.raises(RuntimeError):
+            await auth.refresh_access_token("RT", "cid", "csec")
+
+    @respx.mock
+    async def test_propagates_timeout(self):
+        respx.post(auth.TOKEN_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+        with pytest.raises(RuntimeError):
             await auth.refresh_access_token("RT", "cid", "csec")
 
     @respx.mock
