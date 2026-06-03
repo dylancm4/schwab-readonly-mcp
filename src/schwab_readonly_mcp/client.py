@@ -8,11 +8,15 @@ BASE_URL = "https://api.schwabapi.com"
 def _safe_account_number(value: str) -> str:
     # read-only safety: account_number is interpolated into the URL path,
     # so reject anything that could traverse to another endpoint or inject a query.
+    # This denylist is sufficient only because the value lands in a path *segment*
+    # behind the fixed BASE_URL host+scheme and httpx percent-encodes exotic path
+    # bytes; revisit if the URL is ever built differently or the value moves to the host.
     if (
         not value
         or any(c.isspace() for c in value)
         or any(c in value for c in "/\\?#%")
         or ".." in value
+        or value == "."
     ):
         raise ValueError("invalid account_number")
     return value

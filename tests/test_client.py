@@ -123,7 +123,11 @@ class TestListAccounts:
 
         assert captured["trust_env"] is False
         assert captured["follow_redirects"] is False
-        assert isinstance(captured["timeout"], httpx.Timeout)
+        # finite timeout — isinstance alone would also pass httpx.Timeout(None).
+        timeout = captured["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.read == 10.0
+        assert timeout.connect == 5.0
 
 
 class TestGetAccount:
@@ -168,7 +172,7 @@ class TestGetAccount:
 
     @pytest.mark.parametrize(
         "bad",
-        ["../../v1/oauth/token", "42?evil=1", "a/b", "a#b", "a%2e", "a\\b", "a b", ""],
+        ["../../v1/oauth/token", "42?evil=1", "a/b", "a#b", "a%2e", "a\\b", "a b", ".", ""],
     )
     @respx.mock
     async def test_rejects_path_injection_account_number(self, bad):
@@ -200,6 +204,23 @@ class TestGetTransactions:
         assert req.url.path == "/trader/v1/accounts/42/transactions"
         assert req.url.params["startDate"] == "2024-01-01T00:00:00.000Z"
         assert req.url.params["endDate"] == "2024-03-31T23:59:59.999Z"
+
+    @respx.mock
+    async def test_accepts_alphanumeric_hash_account_number(self):
+        # Schwab's real account id is an encrypted hash; alphanumerics must pass.
+        acct = "ABC123def456"
+        route = respx.get(f"{ACCOUNTS_URL}/{acct}/transactions").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        c = client.SchwabClient("TOKEN")
+        await c.get_transactions(acct, "2024-01-01", "2024-03-31")
+
+        assert route.called
+        req = route.calls.last.request
+        assert _bearer(req) == "Bearer TOKEN"
+        assert req.url.path == f"/trader/v1/accounts/{acct}/transactions"
+        assert req.url.params["startDate"] == "2024-01-01"
+        assert req.url.params["endDate"] == "2024-03-31"
 
     @respx.mock
     async def test_rejects_path_injection_account_number(self):
