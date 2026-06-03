@@ -1,0 +1,29 @@
+import httpx
+
+from schwab_readonly_mcp.auth import Secret
+
+BASE_URL = "https://api.schwabapi.com"
+
+
+class SchwabClient:
+    def __init__(self, access_token: str) -> None:
+        self._access_token = Secret(access_token)
+
+    async def _get(
+        self, path: str, params: dict[str, str] | None = None
+    ) -> object:
+        async with httpx.AsyncClient(
+            trust_env=False,
+            timeout=httpx.Timeout(10.0, connect=5.0),
+        ) as client:
+            response = await client.get(
+                f"{BASE_URL}{path}",
+                params=params,
+                headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def list_accounts(self, include_positions: bool = True) -> object:
+        params = {"fields": "positions"} if include_positions else None
+        return await self._get("/trader/v1/accounts", params)
