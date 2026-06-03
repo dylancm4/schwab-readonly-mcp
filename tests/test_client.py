@@ -104,3 +104,46 @@ class TestGetTransactions:
         assert req.url.path == "/trader/v1/accounts/42/transactions"
         assert req.url.params["startDate"] == "2024-01-01T00:00:00.000Z"
         assert req.url.params["endDate"] == "2024-03-31T23:59:59.999Z"
+
+
+QUOTES_URL = f"{client.BASE_URL}/marketdata/v1/quotes"
+
+
+class TestGetQuotes:
+    @respx.mock
+    async def test_joins_multiple_symbols_with_comma(self):
+        body = {"AAPL": {}, "MSFT": {}}
+        route = respx.get(QUOTES_URL).mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        c = client.SchwabClient("TOKEN")
+        result = await c.get_quotes(["AAPL", "MSFT"])
+
+        assert result == body
+        req = route.calls.last.request
+        assert _bearer(req) == "Bearer TOKEN"
+        assert req.url.path == "/marketdata/v1/quotes"
+        assert req.url.params["symbols"] == "AAPL,MSFT"
+
+    @respx.mock
+    async def test_single_symbol(self):
+        route = respx.get(QUOTES_URL).mock(
+            return_value=httpx.Response(200, json={"AAPL": {}})
+        )
+        c = client.SchwabClient("TOKEN")
+        await c.get_quotes(["AAPL"])
+
+        req = route.calls.last.request
+        assert req.url.params["symbols"] == "AAPL"
+
+    @respx.mock
+    async def test_empty_symbols_sends_empty_param(self):
+        route = respx.get(QUOTES_URL).mock(
+            return_value=httpx.Response(200, json={})
+        )
+        c = client.SchwabClient("TOKEN")
+        result = await c.get_quotes([])
+
+        assert result == {}
+        req = route.calls.last.request
+        assert req.url.params["symbols"] == ""

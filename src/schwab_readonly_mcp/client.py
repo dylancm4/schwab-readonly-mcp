@@ -41,3 +41,9 @@ class SchwabClient:
             f"/trader/v1/accounts/{account_number}/transactions",
             {"startDate": start_date, "endDate": end_date},
         )
+
+    async def get_quotes(self, symbols: list[str]) -> object:
+        return await self._get(
+            "/marketdata/v1/quotes",
+            {"symbols": ",".join(symbols)},
+        )
