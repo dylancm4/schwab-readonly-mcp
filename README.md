@@ -4,7 +4,7 @@ A minimal, auditable, **read-only** [Model Context Protocol](https://modelcontex
 
 Written from scratch — no third-party Schwab SDK, no aggregators — so the entire surface a Schwab access token touches can be read end-to-end in a single sitting.
 
-> **Status: bootstrap.** This repository currently contains only project scaffolding (pinned dependencies, license, layout). The auth module, REST client, and MCP server will land in subsequent commits.
+> **Status: in progress.** The auth module (Keychain token storage + OAuth refresh) and the read-only REST client have landed, each with full test coverage. The MCP server entry point and the one-time authorization helper are the remaining pieces.
 
 ## Disclaimer
 
@@ -14,11 +14,11 @@ This is a personal-use tool. The author makes no warranty as to its correctness 
 
 ## Audit promise
 
-This server is structured so that three properties are mechanically verifiable, not just claimed. Properties 1 and 2 are *forward-looking* — `client.py` and `auth.py` don't exist yet, so the grep checks against those files trivially pass on a missing target. They become meaningful checks once Stage 2 lands functional code. Property 3 is verifiable today.
+This server is structured so that three properties are mechanically verifiable, not just claimed. All three are verifiable today against the code in this repository.
 
-1. **Read-only against Schwab** (once `client.py` lands). No `httpx.post`, `httpx.put`, `httpx.delete`, or `httpx.patch` calls in `src/schwab_readonly_mcp/client.py` — the only module that talks to the Schwab data APIs. Verified by `grep`. There is no code path that can place, cancel, or modify an order. (`auth.py` does POST to Schwab's OAuth token endpoint to obtain and refresh access tokens; that's authentication, not account-state mutation.)
-2. **No tokens on disk** (once `auth.py` lands). OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep` for `open(` / `with open` in `src/schwab_readonly_mcp/auth.py`.
-3. **Pinned, hash-locked dependencies** (verifiable now). `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
+1. **Read-only against Schwab.** No `httpx.post`, `httpx.put`, `httpx.delete`, or `httpx.patch` calls in `src/schwab_readonly_mcp/client.py` — the only module that talks to the Schwab data APIs. Verified by `grep -nE "httpx\.(post|put|delete|patch)" src/schwab_readonly_mcp/client.py` (zero matches). There is no code path that can place, cancel, or modify an order. (`auth.py` does POST to Schwab's OAuth token endpoint to obtain and refresh access tokens; that's authentication, not account-state mutation.)
+2. **No tokens on disk.** OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep -nE "open\(|with open" src/schwab_readonly_mcp/auth.py` (zero matches).
+3. **Pinned, hash-locked dependencies.** `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
 
 Total source budget when complete: roughly 300 lines across three files. The point is that one person can read all of it in an afternoon.
 
