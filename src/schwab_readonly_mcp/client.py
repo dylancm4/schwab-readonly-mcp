@@ -33,3 +33,11 @@ class SchwabClient:
     ) -> object:
         params = {"fields": "positions"} if include_positions else None
         return await self._get(f"/trader/v1/accounts/{account_number}", params)
+
+    async def get_transactions(
+        self, account_number: str, start_date: str, end_date: str
+    ) -> object:
+        return await self._get(
+            f"/trader/v1/accounts/{account_number}/transactions",
+            {"startDate": start_date, "endDate": end_date},
+        )

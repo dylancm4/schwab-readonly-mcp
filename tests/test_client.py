@@ -82,3 +82,25 @@ class TestGetAccount:
         req = route.calls.last.request
         assert req.url.path == "/trader/v1/accounts/42"
         assert "fields" not in req.url.params
+
+
+class TestGetTransactions:
+    @respx.mock
+    async def test_sends_date_params_and_returns_body(self):
+        body = [{"transactionId": 1}]
+        route = respx.get(f"{ACCOUNTS_URL}/42/transactions").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        c = client.SchwabClient("TOKEN")
+        result = await c.get_transactions(
+            "42",
+            "2024-01-01T00:00:00.000Z",
+            "2024-03-31T23:59:59.999Z",
+        )
+
+        assert result == body
+        req = route.calls.last.request
+        assert _bearer(req) == "Bearer TOKEN"
+        assert req.url.path == "/trader/v1/accounts/42/transactions"
+        assert req.url.params["startDate"] == "2024-01-01T00:00:00.000Z"
+        assert req.url.params["endDate"] == "2024-03-31T23:59:59.999Z"
