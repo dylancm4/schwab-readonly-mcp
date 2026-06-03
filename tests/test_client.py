@@ -80,15 +80,27 @@ class TestListAccounts:
     @respx.mock
     async def test_http_error_does_not_leak_bearer_token(self):
         # The teeth: the raised error must not carry the Bearer token that the
-        # secret-bearing request headers would expose.
+        # secret-bearing request headers would expose — not only in str/repr, but
+        # anywhere reachable by walking the exception chain (__context__/__cause__)
+        # down to a retained httpx request's headers/body.
         respx.get(ACCOUNTS_URL).mock(
             return_value=httpx.Response(401, json={"error": "boom"})
         )
         c = client.SchwabClient("SUPERSECRET")
         with pytest.raises(RuntimeError) as excinfo:
             await c.list_accounts()
-        assert "SUPERSECRET" not in str(excinfo.value)
-        assert "SUPERSECRET" not in repr(excinfo.value)
+        exc = excinfo.value
+        assert exc.__context__ is None
+        assert exc.__cause__ is None
+        seen, cur = [], exc
+        while cur is not None and cur not in seen:
+            seen.append(cur)
+            text = repr(cur) + str(cur)
+            req = getattr(cur, "request", None)
+            if req is not None:
+                text += repr(dict(req.headers)) + req.content.decode("utf-8", "replace")
+            assert "SUPERSECRET" not in text
+            cur = cur.__context__ or cur.__cause__
 
     @respx.mock
     async def test_raises_on_non_json_body(self):

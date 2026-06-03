@@ -282,7 +282,9 @@ class TestExchangeCodeForTokens:
     @respx.mock
     async def test_http_error_does_not_leak_credentials_or_code(self):
         # The teeth: the raised error must not carry the Basic credentials or the
-        # authorization code that the secret-bearing request would expose.
+        # authorization code that the secret-bearing request would expose — not
+        # only in str/repr, but anywhere reachable by walking the exception chain
+        # (__context__/__cause__) down to a retained httpx request's headers/body.
         respx.post(auth.TOKEN_URL).mock(
             return_value=httpx.Response(400, json={"error": "boom"})
         )
@@ -290,9 +292,19 @@ class TestExchangeCodeForTokens:
             await auth.exchange_code_for_tokens(
                 "THECODE", "cid", "SUPERSECRET", "https://127.0.0.1:8182"
             )
-        for leaked in ("SUPERSECRET", "THECODE"):
-            assert leaked not in str(excinfo.value)
-            assert leaked not in repr(excinfo.value)
+        exc = excinfo.value
+        assert exc.__context__ is None
+        assert exc.__cause__ is None
+        seen, cur = [], exc
+        while cur is not None and cur not in seen:
+            seen.append(cur)
+            text = repr(cur) + str(cur)
+            req = getattr(cur, "request", None)
+            if req is not None:
+                text += repr(dict(req.headers)) + req.content.decode("utf-8", "replace")
+            for leaked in ("SUPERSECRET", "THECODE"):
+                assert leaked not in text
+            cur = cur.__context__ or cur.__cause__
 
     # Kept distinct from test_raises_on_invalid_payload_field: both end at
     # _require_str via ValueError, but document missing-key vs present-but-invalid
@@ -458,15 +470,27 @@ class TestRefreshAccessToken:
     @respx.mock
     async def test_http_error_does_not_leak_credentials_or_refresh_token(self):
         # The teeth: the raised error must not carry the Basic credentials or the
-        # refresh token that the secret-bearing request would expose.
+        # refresh token that the secret-bearing request would expose — not only in
+        # str/repr, but anywhere reachable by walking the exception chain
+        # (__context__/__cause__) down to a retained httpx request's headers/body.
         respx.post(auth.TOKEN_URL).mock(
             return_value=httpx.Response(400, json={"error": "boom"})
         )
         with pytest.raises(RuntimeError) as excinfo:
             await auth.refresh_access_token("RT_SUPERSECRET", "cid", "CSEC_SECRET")
-        for leaked in ("RT_SUPERSECRET", "CSEC_SECRET"):
-            assert leaked not in str(excinfo.value)
-            assert leaked not in repr(excinfo.value)
+        exc = excinfo.value
+        assert exc.__context__ is None
+        assert exc.__cause__ is None
+        seen, cur = [], exc
+        while cur is not None and cur not in seen:
+            seen.append(cur)
+            text = repr(cur) + str(cur)
+            req = getattr(cur, "request", None)
+            if req is not None:
+                text += repr(dict(req.headers)) + req.content.decode("utf-8", "replace")
+            for leaked in ("RT_SUPERSECRET", "CSEC_SECRET"):
+                assert leaked not in text
+            cur = cur.__context__ or cur.__cause__
 
     # Kept distinct from test_raises_on_invalid_payload_field: both end at
     # _require_str via ValueError, but document missing-key vs present-but-invalid

@@ -75,10 +75,12 @@ def load_tokens() -> TokenSet:
 
 def scrubbed_http_error(exc: httpx.HTTPError) -> RuntimeError:
     # The httpx exception retains the live request, whose headers carry
-    # credentials (Basic for auth, Bearer for the data client) and whose
-    # body can carry the OAuth code / refresh token. Surface only a safe
-    # summary so the secret-bearing request is never propagated to logs
-    # or a crash reporter. Reading exc.response.status_code (an int) and
+    # credentials and whose body can carry secrets (the OAuth code /
+    # refresh token). Surface only a safe summary so the secret-bearing
+    # request is never propagated to logs or a crash reporter. Callers must
+    # raise the result OUTSIDE the except block so no active exception sets
+    # __context__ back to the original (secret-bearing) httpx error.
+    # Reading exc.response.status_code (an int) and
     # type(exc).__name__ is safe; never embed str(exc), the request, or the
     # response object in the message.
     if isinstance(exc, httpx.HTTPStatusError):
@@ -121,8 +123,16 @@ async def exchange_code_for_tokens(
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
-            raise scrubbed_http_error(e) from None
-        payload = response.json()
+            # Build the scrubbed error here, but raise it OUTSIDE the except
+            # block (after the `with`): with no active exception at the raise
+            # site its __context__ stays None, so the live request carrying the
+            # Basic creds + OAuth code can't be reached via the exception chain.
+            error = scrubbed_http_error(e)
+        else:
+            payload = response.json()
+            error = None
+    if error is not None:
+        raise error
     return TokenSet(
         access_token=Secret(_require_str(payload, "access_token")),
         refresh_token=Secret(_require_str(payload, "refresh_token")),
@@ -145,8 +155,16 @@ async def refresh_access_token(
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
-            raise scrubbed_http_error(e) from None
-        payload = response.json()
+            # Build the scrubbed error here, but raise it OUTSIDE the except
+            # block (after the `with`): with no active exception at the raise
+            # site its __context__ stays None, so the live request carrying the
+            # Basic creds + refresh token can't be reached via the exception chain.
+            error = scrubbed_http_error(e)
+        else:
+            payload = response.json()
+            error = None
+    if error is not None:
+        raise error
     new_rt = payload.get("refresh_token") or refresh_token
     if not isinstance(new_rt, str) or not new_rt:
         raise ValueError("token endpoint returned invalid refresh_token")

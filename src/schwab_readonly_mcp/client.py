@@ -45,8 +45,14 @@ class SchwabClient:
                 )
                 response.raise_for_status()
             except httpx.HTTPError as e:
-                raise scrubbed_http_error(e) from None
-            return response.json()
+                # Build the scrubbed error here, but raise it OUTSIDE the except
+                # block: with no active exception at the raise site, its
+                # __context__ stays None, so the live secret-bearing httpx
+                # request can't be reached by a crash reporter walking the chain.
+                error = scrubbed_http_error(e)
+            else:
+                return response.json()
+        raise error
 
     async def list_accounts(self, include_positions: bool = True) -> object:
         params = {"fields": "positions"} if include_positions else None
