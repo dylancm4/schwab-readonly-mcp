@@ -147,3 +147,33 @@ class TestGetQuotes:
         assert result == {}
         req = route.calls.last.request
         assert req.url.params["symbols"] == ""
+
+
+PRICE_HISTORY_URL = f"{client.BASE_URL}/marketdata/v1/pricehistory"
+
+
+class TestGetPriceHistory:
+    @respx.mock
+    async def test_maps_snake_case_args_to_camel_case_params(self):
+        body = {"symbol": "AAPL", "candles": []}
+        route = respx.get(PRICE_HISTORY_URL).mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        c = client.SchwabClient("TOKEN")
+        result = await c.get_price_history(
+            symbol="AAPL",
+            period_type="month",
+            period=1,
+            frequency_type="daily",
+            frequency=1,
+        )
+
+        assert result == body
+        req = route.calls.last.request
+        assert _bearer(req) == "Bearer TOKEN"
+        assert req.url.path == "/marketdata/v1/pricehistory"
+        assert req.url.params["symbol"] == "AAPL"
+        assert req.url.params["periodType"] == "month"
+        assert req.url.params["period"] == "1"
+        assert req.url.params["frequencyType"] == "daily"
+        assert req.url.params["frequency"] == "1"

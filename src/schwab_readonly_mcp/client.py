@@ -10,7 +10,7 @@ class SchwabClient:
         self._access_token = Secret(access_token)
 
     async def _get(
-        self, path: str, params: dict[str, str] | None = None
+        self, path: str, params: dict[str, str | int] | None = None
     ) -> object:
         async with httpx.AsyncClient(
             trust_env=False,
@@ -46,4 +46,23 @@ class SchwabClient:
         return await self._get(
             "/marketdata/v1/quotes",
             {"symbols": ",".join(symbols)},
+        )
+
+    async def get_price_history(
+        self,
+        symbol: str,
+        period_type: str,
+        period: int,
+        frequency_type: str,
+        frequency: int,
+    ) -> object:
+        return await self._get(
+            "/marketdata/v1/pricehistory",
+            {
+                "symbol": symbol,
+                "periodType": period_type,
+                "period": period,
+                "frequencyType": frequency_type,
+                "frequency": frequency,
+            },
         )
