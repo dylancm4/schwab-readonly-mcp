@@ -12,6 +12,10 @@ class Secret:
     __slots__ = ("_value",)
 
     def __init__(self, value: str) -> None:
+        # Unwrap a stray double-wrap so reveal() always returns the raw value,
+        # never a nested Secret.
+        if isinstance(value, Secret):
+            value = value.reveal()
         self._value = value
 
     def reveal(self) -> str:
@@ -28,6 +32,12 @@ class Secret:
 
     def __reduce__(self) -> tuple:
         return (Secret, ("<redacted>",))
+
+    def __getstate__(self) -> object:
+        # __reduce__ governs pickle/copy (both redact), but a direct
+        # __getstate__() call on a __slots__ object would otherwise return the
+        # raw value. Redact this introspection path too.
+        return (None, {"_value": "<redacted>"})
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Secret):

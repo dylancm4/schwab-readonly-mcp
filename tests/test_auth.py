@@ -137,6 +137,21 @@ class TestSecret:
         d = {auth.Secret("A"): 1}
         assert d[auth.Secret("A")] == 1
 
+    def test_getstate_does_not_leak_raw_value(self):
+        # __reduce__ already governs pickle/copy (both redact), but a direct
+        # __getstate__() call on a __slots__ object would otherwise expose the
+        # raw value. Redact this introspection path too.
+        s = auth.Secret("SUPERSECRET")
+        assert "SUPERSECRET" not in repr(s.__getstate__())
+
+    def test_double_wrap_unwraps_to_raw_string(self):
+        # Secret(Secret(x)) must reveal the raw string, not a nested Secret,
+        # so a stray double-wrap can't make reveal() return a Secret.
+        s = auth.Secret(auth.Secret("SUPERSECRET"))
+        assert s.reveal() == "SUPERSECRET"
+        assert "SUPERSECRET" not in repr(s)
+        assert "SUPERSECRET" not in str(s)
+
 
 class TestStoreLoadTokens:
     def test_store_writes_three_keychain_entries(self):
