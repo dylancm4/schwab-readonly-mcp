@@ -625,3 +625,61 @@ class TestGetAccessToken:
         assert result == "NEW"
         ref_mock.assert_awaited_once_with("RT", "cid", "csec")
         store.assert_called_once_with(refreshed)
+
+    async def test_propagates_refresh_failure_without_storing(self):
+        # If refresh fails (e.g. a scrubbed RuntimeError from a network error),
+        # the failure must propagate and NO tokens get stored — never silently
+        # hand back the already-expired access token.
+        loaded = self._loaded(int(self.NOW) - 100)
+        ref_mock = AsyncMock(side_effect=RuntimeError("Schwab API returned HTTP 400"))
+        with (
+            patch.object(auth, "load_tokens", return_value=loaded),
+            patch.object(auth, "refresh_access_token", ref_mock),
+            patch.object(auth, "store_tokens") as store,
+            patch.object(auth.time, "time", return_value=self.NOW),
+        ):
+            with pytest.raises(RuntimeError, match="HTTP 400"):
+                await auth.get_access_token("cid", "csec")
+
+        ref_mock.assert_awaited_once_with("RT", "cid", "csec")
+        store.assert_not_called()
+
+
+class TestTransportHardening:
+    @pytest.mark.parametrize(
+        "invoke",
+        [
+            lambda: auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            ),
+            lambda: auth.refresh_access_token("RT", "cid", "csec"),
+        ],
+        ids=["exchange", "refresh"],
+    )
+    @respx.mock
+    async def test_construction_contract(self, invoke):
+        # Lock the security-relevant AsyncClient kwargs on the credential-bearing
+        # token POSTs against future refactors — parity with client._get.
+        real_cls = auth.httpx.AsyncClient
+        captured: dict[str, object] = {}
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return real_cls(*args, **kwargs)
+
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "AT", "refresh_token": "RT", "expires_in": 1800},
+            )
+        )
+        with patch.object(auth.httpx, "AsyncClient", side_effect=spy):
+            await invoke()
+
+        assert captured["trust_env"] is False
+        assert captured["follow_redirects"] is False
+        # finite timeout — isinstance alone would also pass httpx.Timeout(None).
+        timeout = captured["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.read == 10.0
+        assert timeout.connect == 5.0

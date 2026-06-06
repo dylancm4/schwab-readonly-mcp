@@ -120,6 +120,9 @@ async def exchange_code_for_tokens(
     async with httpx.AsyncClient(
         trust_env=False,
         timeout=httpx.Timeout(10.0, connect=5.0),
+        # read-only: never auto-follow a redirect off the fixed token endpoint
+        # (parity with client.py; makes the invariant explicit, not default-dependent).
+        follow_redirects=False,
     ) as client:
         try:
             response = await client.post(
@@ -156,6 +159,9 @@ async def refresh_access_token(
     async with httpx.AsyncClient(
         trust_env=False,
         timeout=httpx.Timeout(10.0, connect=5.0),
+        # read-only: never auto-follow a redirect off the fixed token endpoint
+        # (parity with client.py; makes the invariant explicit, not default-dependent).
+        follow_redirects=False,
     ) as client:
         try:
             response = await client.post(
