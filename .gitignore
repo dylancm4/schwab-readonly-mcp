@@ -45,3 +45,8 @@ private/
 *.token
 tokens.json
 /tmp/*.pem
+
+# Claude Code: local-only agent tooling for this repo (workflows, settings).
+# Unlike some projects that commit .claude/ as a shared asset, this is a public,
+# security-sensitive repo — keep agent tooling on the machine, not published.
+.claude/
