@@ -32,9 +32,7 @@ class TestListAccounts:
 
     @respx.mock
     async def test_omits_fields_when_positions_excluded(self):
-        route = respx.get(ACCOUNTS_URL).mock(
-            return_value=httpx.Response(200, json=[])
-        )
+        route = respx.get(ACCOUNTS_URL).mock(return_value=httpx.Response(200, json=[]))
         c = client.SchwabClient("TOKEN")
         result = await c.list_accounts(include_positions=False)
 
@@ -143,9 +141,7 @@ class TestListAccounts:
 
         with patch.object(client.httpx, "AsyncClient", side_effect=spy):
             with respx.mock:
-                respx.get(ACCOUNTS_URL).mock(
-                    return_value=httpx.Response(200, json=[])
-                )
+                respx.get(ACCOUNTS_URL).mock(return_value=httpx.Response(200, json=[]))
                 await client.SchwabClient("TOKEN").list_accounts()
 
         assert captured["trust_env"] is False
@@ -155,6 +151,10 @@ class TestListAccounts:
         assert isinstance(timeout, httpx.Timeout)
         assert timeout.read == 10.0
         assert timeout.connect == 5.0
+        # The positional 10.0 sets all four — pin write/pool too so a refactor to
+        # Timeout(connect=5.0, read=10.0) can't silently leave them infinite.
+        assert timeout.write == 10.0
+        assert timeout.pool == 10.0
 
 
 class TestGetAccount:
@@ -199,7 +199,17 @@ class TestGetAccount:
 
     @pytest.mark.parametrize(
         "bad",
-        ["../../v1/oauth/token", "42?evil=1", "a/b", "a#b", "a%2e", "a\\b", "a b", ".", ""],
+        [
+            "../../v1/oauth/token",
+            "42?evil=1",
+            "a/b",
+            "a#b",
+            "a%2e",
+            "a\\b",
+            "a b",
+            ".",
+            "",
+        ],
     )
     @respx.mock
     async def test_rejects_path_injection_account_number(self, bad):
@@ -265,9 +275,7 @@ class TestGetQuotes:
     @respx.mock
     async def test_joins_multiple_symbols_with_comma(self):
         body = {"AAPL": {}, "MSFT": {}}
-        route = respx.get(QUOTES_URL).mock(
-            return_value=httpx.Response(200, json=body)
-        )
+        route = respx.get(QUOTES_URL).mock(return_value=httpx.Response(200, json=body))
         c = client.SchwabClient("TOKEN")
         result = await c.get_quotes(["AAPL", "MSFT"])
 
@@ -290,9 +298,7 @@ class TestGetQuotes:
 
     @respx.mock
     async def test_empty_symbols_sends_empty_param(self):
-        route = respx.get(QUOTES_URL).mock(
-            return_value=httpx.Response(200, json={})
-        )
+        route = respx.get(QUOTES_URL).mock(return_value=httpx.Response(200, json={}))
         c = client.SchwabClient("TOKEN")
         result = await c.get_quotes([])
 

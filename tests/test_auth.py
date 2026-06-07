@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import copy
 import dataclasses
@@ -332,7 +333,7 @@ class TestExchangeCodeForTokens:
         "payload",
         [
             {"refresh_token": "RT", "expires_in": 1800},  # missing access_token
-            {"access_token": "AT", "expires_in": 1800},   # missing refresh_token
+            {"access_token": "AT", "expires_in": 1800},  # missing refresh_token
             {"access_token": "AT", "refresh_token": "RT"},  # missing expires_in
         ],
         ids=["no_access_token", "no_refresh_token", "no_expires_in"],
@@ -580,7 +581,7 @@ class TestGetAccessToken:
     async def test_returns_loaded_when_fresh(self):
         loaded = self._loaded(int(self.NOW) + 100)
         with (
-            patch.object(auth, "load_tokens", return_value=loaded),
+            patch.object(auth, "load_tokens", return_value=loaded) as load,
             patch.object(auth, "refresh_access_token", new_callable=AsyncMock) as ref,
             patch.object(auth, "store_tokens") as store,
             patch.object(auth.time, "time", return_value=self.NOW),
@@ -588,6 +589,9 @@ class TestGetAccessToken:
             result = await auth.get_access_token("cid", "csec")
 
         assert result == "OLD"
+        # Fast path: the pre-lock check returns the stored token, so we never
+        # re-load inside the lock.
+        load.assert_called_once()
         ref.assert_not_called()
         store.assert_not_called()
 
@@ -595,13 +599,14 @@ class TestGetAccessToken:
         # delta = 30 → not < 30 → no refresh
         loaded = self._loaded(int(self.NOW) + 30)
         with (
-            patch.object(auth, "load_tokens", return_value=loaded),
+            patch.object(auth, "load_tokens", return_value=loaded) as load,
             patch.object(auth, "refresh_access_token", new=AsyncMock()) as ref,
             patch.object(auth, "store_tokens") as store,
             patch.object(auth.time, "time", return_value=self.NOW),
         ):
             result = await auth.get_access_token("cid", "csec")
         assert result == "OLD"
+        load.assert_called_once()
         ref.assert_not_awaited()
         store.assert_not_called()
 
@@ -615,7 +620,7 @@ class TestGetAccessToken:
         )
         ref_mock = AsyncMock(return_value=refreshed)
         with (
-            patch.object(auth, "load_tokens", return_value=loaded),
+            patch.object(auth, "load_tokens", return_value=loaded) as load,
             patch.object(auth, "refresh_access_token", ref_mock),
             patch.object(auth, "store_tokens") as store,
             patch.object(auth.time, "time", return_value=self.NOW),
@@ -623,6 +628,9 @@ class TestGetAccessToken:
             result = await auth.get_access_token("cid", "csec")
 
         assert result == "NEW"
+        # Refresh path double-loads by design: once before the lock, then again
+        # inside it (another coroutine may have refreshed while we waited).
+        assert load.call_count == 2
         ref_mock.assert_awaited_once_with("RT", "cid", "csec")
         store.assert_called_once_with(refreshed)
 
@@ -633,7 +641,7 @@ class TestGetAccessToken:
         loaded = self._loaded(int(self.NOW) - 100)
         ref_mock = AsyncMock(side_effect=RuntimeError("Schwab API returned HTTP 400"))
         with (
-            patch.object(auth, "load_tokens", return_value=loaded),
+            patch.object(auth, "load_tokens", return_value=loaded) as load,
             patch.object(auth, "refresh_access_token", ref_mock),
             patch.object(auth, "store_tokens") as store,
             patch.object(auth.time, "time", return_value=self.NOW),
@@ -641,8 +649,70 @@ class TestGetAccessToken:
             with pytest.raises(RuntimeError, match="HTTP 400"):
                 await auth.get_access_token("cid", "csec")
 
+        # Re-load inside the lock confirmed still-expired, then refresh failed.
+        assert load.call_count == 2
         ref_mock.assert_awaited_once_with("RT", "cid", "csec")
         store.assert_not_called()
+
+    @respx.mock
+    async def test_concurrent_near_expiry_refreshes_exactly_once(self):
+        # FastMCP serves tool calls concurrently and Schwab ROTATES the refresh
+        # token on use, so two near-expiry get_access_token calls racing to
+        # refresh would invalidate each other. The double-checked lock must let
+        # exactly ONE refresh happen; the loser re-reads the freshly-stored token.
+        store = {
+            "access_token": "OLD",
+            "refresh_token": "RT",
+            "access_expires_at": str(int(self.NOW) - 100),  # already expired
+        }
+
+        # Dict-backed keyring fake: set_password writes, get_password reads the
+        # SAME store, so a refresh by one coroutine is visible to the other.
+        def fake_set(service, key, value):
+            assert service == auth.SERVICE
+            store[key] = value
+
+        def fake_get(service, key):
+            assert service == auth.SERVICE
+            return store.get(key)
+
+        # The refresh handler yields control (await) BEFORE responding, so the
+        # second caller is guaranteed to run while the first is mid-refresh. A
+        # plain return_value mock resolves without yielding, letting caller #1
+        # finish its whole refresh first — that would mask a missing lock. This
+        # yield is what gives the test teeth: without the lock, both callers pass
+        # the in-lock re-check and route.call_count would be 2.
+        async def slow_refresh(request):
+            await asyncio.sleep(0)
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "NEW",
+                    "refresh_token": "RT2",
+                    "expires_in": 1800,  # far-future relative to NOW
+                },
+            )
+
+        route = respx.post(auth.TOKEN_URL).mock(side_effect=slow_refresh)
+
+        with (
+            patch.object(auth.keyring, "set_password", side_effect=fake_set),
+            patch.object(auth.keyring, "get_password", side_effect=fake_get),
+            patch.object(auth.time, "time", return_value=self.NOW),
+        ):
+            results = await asyncio.gather(
+                auth.get_access_token("cid", "csec"),
+                auth.get_access_token("cid", "csec"),
+            )
+
+        # Exactly one network refresh despite two concurrent callers.
+        assert route.call_count == 1
+        # Both callers return the SAME new access token.
+        assert results == ["NEW", "NEW"]
+        # The rotated tokens were persisted for the next call.
+        assert store["access_token"] == "NEW"
+        assert store["refresh_token"] == "RT2"
+        assert store["access_expires_at"] == str(int(self.NOW) + 1800)
 
 
 class TestTransportHardening:
@@ -683,3 +753,7 @@ class TestTransportHardening:
         assert isinstance(timeout, httpx.Timeout)
         assert timeout.read == 10.0
         assert timeout.connect == 5.0
+        # The positional 10.0 sets all four — pin write/pool too so a refactor to
+        # Timeout(connect=5.0, read=10.0) can't silently leave them infinite.
+        assert timeout.write == 10.0
+        assert timeout.pool == 10.0
