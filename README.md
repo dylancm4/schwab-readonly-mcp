@@ -4,7 +4,7 @@ A minimal, auditable, **read-only** [Model Context Protocol](https://modelcontex
 
 Written from scratch — no third-party Schwab SDK, no aggregators — so the entire surface a Schwab access token touches can be read end-to-end in a single sitting.
 
-> **Status: in progress.** The auth module (Keychain token storage + OAuth refresh) and the read-only REST client have landed, each with full test coverage. The MCP server entry point and the one-time authorization helper are the remaining pieces.
+> **Status: in progress.** The auth module (Keychain token storage + OAuth refresh), the read-only REST client, and the MCP server entry point have landed, each with test coverage. The one-time authorization helper (`scripts/authorize.py`) is the remaining piece, so the server is not yet runnable end-to-end.
 
 ## Disclaimer
 
