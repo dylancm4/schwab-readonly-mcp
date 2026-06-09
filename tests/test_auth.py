@@ -596,7 +596,7 @@ class TestGetAccessToken:
         store.assert_not_called()
 
     async def test_does_not_refresh_at_exact_threshold(self):
-        # delta = 30 → not < 30 → no refresh
+        # delta = 30 → 30 >= REFRESH_SKEW_SECONDS → fresh → no refresh
         loaded = self._loaded(int(self.NOW) + 30)
         with (
             patch.object(auth, "load_tokens", return_value=loaded) as load,
@@ -713,6 +713,83 @@ class TestGetAccessToken:
         assert store["access_token"] == "NEW"
         assert store["refresh_token"] == "RT2"
         assert store["access_expires_at"] == str(int(self.NOW) + 1800)
+
+    @respx.mock
+    async def test_concurrent_refresh_failure_releases_lock_for_waiter(self):
+        # Deadlock-guard regression. `async with _refresh_lock` releases the lock
+        # structurally even when the in-lock refresh RAISES — but a future refactor
+        # to manual acquire/release could regress this with no other test failing.
+        # Here caller A's refresh fails (HTTP 400) while caller B is genuinely
+        # blocked on the lock; B must make forward progress (re-load, retry its own
+        # refresh) rather than deadlock. wait_for proves there's no hang.
+        store = {
+            "access_token": "OLD",
+            "refresh_token": "RT",
+            "access_expires_at": str(int(self.NOW) - 100),  # already expired
+        }
+
+        def fake_set(service, key, value):
+            assert service == auth.SERVICE
+            store[key] = value
+
+        def fake_get(service, key):
+            assert service == auth.SERVICE
+            return store.get(key)
+
+        # First POST fails, second succeeds. Both handlers await before responding
+        # so the second caller is guaranteed to be blocked on the lock while the
+        # first is mid-refresh — making the lock-release the thing under test.
+        calls = {"n": 0}
+
+        async def first_fails_then_succeeds(request):
+            await asyncio.sleep(0)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(400, json={"error": "invalid_grant"})
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "NEW",
+                    "refresh_token": "RT2",
+                    "expires_in": 1800,
+                },
+            )
+
+        route = respx.post(auth.TOKEN_URL).mock(side_effect=first_fails_then_succeeds)
+
+        # The module-level lock lazily binds to the first event loop that awaits it;
+        # pytest-asyncio gives each test a fresh loop, so swap in a lock bound to THIS
+        # loop (and assert against that same instance below). Order-independent.
+        fresh_lock = asyncio.Lock()
+        with (
+            patch.object(auth, "_refresh_lock", fresh_lock),
+            patch.object(auth.keyring, "set_password", side_effect=fake_set),
+            patch.object(auth.keyring, "get_password", side_effect=fake_get),
+            patch.object(auth.time, "time", return_value=self.NOW),
+        ):
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    auth.get_access_token("cid", "csec"),
+                    auth.get_access_token("cid", "csec"),
+                    return_exceptions=True,
+                ),
+                timeout=5,
+            )
+            # Same instance the code used — released both on failure and success.
+            assert fresh_lock.locked() is False
+
+        # Exactly one caller failed (scrubbed RuntimeError, no secret) and the other
+        # made forward progress through its OWN refresh once the lock was released.
+        errors = [r for r in results if isinstance(r, BaseException)]
+        tokens = [r for r in results if not isinstance(r, BaseException)]
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert "HTTP 400" in str(errors[0])
+        assert "RT" not in str(errors[0])  # the refresh token never leaks
+        assert tokens == ["NEW"]
+        # Two POSTs: A failed, then B retried under the released lock (the lock-was-
+        # released assertion is checked above on the exact instance the code used).
+        assert route.call_count == 2
 
 
 class TestTransportHardening:

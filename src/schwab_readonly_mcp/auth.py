@@ -7,6 +7,10 @@ import keyring
 
 SERVICE = "schwab-readonly-mcp"
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
+# Refresh when an access token is within this many seconds of expiry. Used at
+# both the pre-lock check and the in-lock re-check in get_access_token; they
+# MUST share one value or the double-checked-lock re-check semantics drift.
+REFRESH_SKEW_SECONDS = 30
 
 # Serializes the near-expiry refresh path in get_access_token. FastMCP serves
 # tool calls concurrently and Schwab rotates the refresh token on use, so two
@@ -199,14 +203,14 @@ async def refresh_access_token(
 
 async def get_access_token(client_id: str, client_secret: str) -> str:
     loaded = load_tokens()
-    if loaded.access_expires_at - time.time() >= 30:
+    if loaded.access_expires_at - time.time() >= REFRESH_SKEW_SECONDS:
         return loaded.access_token.reveal()
     # Near expiry. Serialize refresh — Schwab rotates the refresh token on use,
     # so two concurrent refreshes would invalidate each other. Re-load + re-check
     # inside the lock: another coroutine may have refreshed while we waited.
     async with _refresh_lock:
         loaded = load_tokens()
-        if loaded.access_expires_at - time.time() >= 30:
+        if loaded.access_expires_at - time.time() >= REFRESH_SKEW_SECONDS:
             return loaded.access_token.reveal()
         new = await refresh_access_token(
             loaded.refresh_token.reveal(), client_id, client_secret
