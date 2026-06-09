@@ -207,6 +207,10 @@ class TestGetAccount:
             "a%2e",
             "a\\b",
             "a b",
+            # control chars: NUL and DEL are not isspace(), so they must be
+            # caught by the explicit control-char rejection, not left to httpx.
+            "a\x00b",
+            "a\x7fb",
             ".",
             "",
         ],

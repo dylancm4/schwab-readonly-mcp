@@ -8,12 +8,16 @@ BASE_URL = "https://api.schwabapi.com"
 def _safe_account_number(value: str) -> str:
     # read-only safety: account_number is interpolated into the URL path,
     # so reject anything that could traverse to another endpoint or inject a query.
+    # Control chars (C0 incl. NUL, and DEL) are rejected here explicitly — NUL/DEL
+    # are not isspace() and would otherwise slip past this denylist, leaving the
+    # guarantee resting on downstream httpx behavior instead of the auditable check.
     # This denylist is sufficient only because the value lands in a path *segment*
     # behind the fixed BASE_URL host+scheme and httpx percent-encodes exotic path
     # bytes; revisit if the URL is ever built differently or the value moves to the host.
     if (
         not value
         or any(c.isspace() for c in value)
+        or any(ord(c) < 0x20 or ord(c) == 0x7F for c in value)
         or any(c in value for c in "/\\?#%")
         or ".." in value
         or value == "."
