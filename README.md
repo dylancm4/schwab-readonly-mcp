@@ -20,7 +20,7 @@ This server is structured so that three properties are mechanically verifiable, 
 2. **No tokens on disk.** OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep -nE "open\(|with open" src/schwab_readonly_mcp/auth.py` (zero matches).
 3. **Pinned, hash-locked dependencies.** `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
 
-Total source budget when complete: roughly 300 lines across three files. The point is that one person can read all of it in an afternoon.
+Total source: roughly 400 lines across three modules (`auth.py`, `client.py`, `server.py`), plus a ~220-line one-time authorization script (`scripts/authorize.py`). The point is that one person can read all of it in an afternoon.
 
 ## Dependencies
 
@@ -77,7 +77,7 @@ uv sync --frozen
    export SCHWAB_CLIENT_SECRET=...
    ```
 
-2. Generate a one-day self-signed localhost cert. Schwab requires the OAuth callback to be HTTPS; `scripts/authorize.py` reads this cert/key from `/tmp` and never commits them (`.gitignore` excludes `/tmp/*.pem` and `*.pem`).
+2. Generate a one-day self-signed localhost cert. Schwab requires the OAuth callback to be HTTPS; `scripts/authorize.py` reads this cert/key from system `/tmp` — outside the repo worktree, so git never sees them — and `.gitignore`'s unanchored `*.pem` rule additionally catches any pem that strays into the repo.
 
    ```bash
    openssl req -x509 -newkey rsa:2048 -keyout /tmp/key.pem -out /tmp/cert.pem \
@@ -100,22 +100,33 @@ uv sync --frozen
 
 ### Wire into Claude Code
 
-Register the server with your MCP-aware client (e.g. add an entry to Claude Code's `.claude/settings.json`). The server's runtime needs `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` in its environment (to refresh access tokens); the refresh token itself stays in the Keychain.
+Claude Code reads MCP servers from a project-root `.mcp.json` (or registers them via `claude mcp add`), not from `.claude/settings.json`. The server's runtime needs `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` in its environment (to refresh access tokens); the refresh token itself stays in the Keychain.
+
+Add this to `.mcp.json` in the project where you want the tools available:
 
 ```json
 {
   "mcpServers": {
     "schwab-readonly": {
       "command": "uv",
-      "args": ["run", "schwab-readonly-mcp"],
-      "cwd": "/absolute/path/to/schwab-readonly-mcp",
+      "args": ["run", "--directory", "/absolute/path/to/schwab-readonly-mcp", "schwab-readonly-mcp"],
       "env": {
-        "SCHWAB_CLIENT_ID": "...",
-        "SCHWAB_CLIENT_SECRET": "..."
+        "SCHWAB_CLIENT_ID": "${SCHWAB_CLIENT_ID}",
+        "SCHWAB_CLIENT_SECRET": "${SCHWAB_CLIENT_SECRET}"
       }
     }
   }
 }
+```
+
+The `${VAR}` references are expanded by Claude Code from your shell environment at launch. **Never paste the literal credential values into `.mcp.json` or any other file that can be committed** — keep them in the shell environment only (`.mcp.json` is conventionally checked in, which is exactly how an app secret ends up in a repo).
+
+Alternatively, register it from the command line — but note this is *not* equivalent: your shell expands `"${SCHWAB_CLIENT_ID}"` at `add` time, so the literal values are written into `~/.claude.json` in your home directory (outside any repo, but plaintext on disk; Claude Code documents `${VAR}` expansion only for `.mcp.json`, so prefer the `.mcp.json` form above, which stores only the references):
+
+```bash
+claude mcp add schwab-readonly \
+  -e SCHWAB_CLIENT_ID="${SCHWAB_CLIENT_ID}" -e SCHWAB_CLIENT_SECRET="${SCHWAB_CLIENT_SECRET}" \
+  -- uv run --directory /absolute/path/to/schwab-readonly-mcp schwab-readonly-mcp
 ```
 
 ### Re-authorizing
