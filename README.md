@@ -4,7 +4,7 @@ A minimal, auditable, **read-only** [Model Context Protocol](https://modelcontex
 
 Written from scratch — no third-party Schwab SDK, no aggregators — so the entire surface a Schwab access token touches can be read end-to-end in a single sitting.
 
-> **Status: in progress.** The auth module (Keychain token storage + OAuth refresh), the read-only REST client, and the MCP server entry point have landed, each with test coverage. The one-time authorization helper (`scripts/authorize.py`) is the remaining piece, so the server is not yet runnable end-to-end.
+> **Status: runnable end-to-end.** The auth module (Keychain token storage + OAuth refresh), the read-only REST client, the MCP server entry point, and the one-time authorization helper (`scripts/authorize.py`) have all landed, each with test coverage. Follow [Install](#install) to authorize and wire it into Claude Code.
 
 ## Disclaimer
 
@@ -42,9 +42,9 @@ Dev (3):
 
 No `schwab-py`, no community Schwab MCPs, no third-party aggregator SDKs.
 
-## Tool surface (planned)
+## Tool surface
 
-Exactly five MCP tools will be exposed, all read-only:
+Exactly five MCP tools are exposed, all read-only:
 
 - `list_accounts`
 - `get_account`
@@ -54,13 +54,13 @@ Exactly five MCP tools will be exposed, all read-only:
 
 A guardrail test in `tests/test_server.py` asserts this set exactly, and that no tool name contains any case-insensitive substring from `{place, submit, cancel, order, trade, buy, sell}`.
 
-## Install (planned flow)
-
-> The steps in this section describe how install **will** work once functional code lands. The `uv sync --frozen` step works today, but `scripts/authorize.py` and the MCP server itself don't exist yet — see the [bootstrap notice](#schwab-readonly-mcp) at the top of this README.
+## Install
 
 **Platform: macOS only.** Token storage is keyed to the macOS Keychain via the `keyring` library's `darwin` backend. The `keyring` library itself is cross-platform, but this project does not target or test on Linux or Windows; the audit-promise statement about "OAuth tokens live only in the macOS Keychain" assumes you are running on macOS. Porting would require an explicit choice of Linux/Windows backend (Secret Service, Credential Manager, etc.) and is out of scope.
 
 Requires Python 3.14 and [`uv`](https://docs.astral.sh/uv/). (3.14 was the current stable when this project was bootstrapped; no 3.14-specific language features are used, so the floor can be lowered if needed.)
+
+You also need a [Schwab Developer App](https://developer.schwab.com/) in **"Ready For Use"** state, with its callback URL set to exactly `https://127.0.0.1:8182` (no trailing slash — Schwab does an exact-string comparison). Its **App Key** and **Secret** are your `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET`.
 
 ```bash
 git clone https://github.com/dylancm4/schwab-readonly-mcp.git
@@ -68,15 +68,59 @@ cd schwab-readonly-mcp
 uv sync --frozen
 ```
 
-First-run OAuth (one-time, requires a Schwab Developer App in "Ready For Use" state — **not yet runnable**, ships in a later commit):
+### First-run OAuth (one-time)
 
-```bash
-export SCHWAB_CLIENT_ID=...
-export SCHWAB_CLIENT_SECRET=...
-uv run python scripts/authorize.py
+1. Export your Schwab Developer App credentials into the shell. These come from the Developer Portal; do not commit them.
+
+   ```bash
+   export SCHWAB_CLIENT_ID=...
+   export SCHWAB_CLIENT_SECRET=...
+   ```
+
+2. Generate a one-day self-signed localhost cert. Schwab requires the OAuth callback to be HTTPS; `scripts/authorize.py` reads this cert/key from `/tmp` and never commits them (`.gitignore` excludes `/tmp/*.pem` and `*.pem`).
+
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -keyout /tmp/key.pem -out /tmp/cert.pem \
+       -days 1 -nodes -subj '/CN=127.0.0.1'
+   ```
+
+3. Run the authorization helper. It opens your browser to Schwab's login/consent page, captures the redirect on a single-use `https://127.0.0.1:8182` server, exchanges the returned code for tokens, and stores them in the Keychain.
+
+   ```bash
+   uv run python scripts/authorize.py
+   ```
+
+   Your browser will warn about the self-signed cert on `127.0.0.1` — that is expected; proceed. macOS will prompt for **Keychain access** the first time tokens are stored; approve it.
+
+4. Smoke-test it. The helper prints this exact one-liner on success; it fetches a (possibly refreshed) access token, lists your accounts, and prints a **truncated** JSON dump (never tokens). Confirm the holdings match what you see on schwab.com.
+
+   ```bash
+   uv run python -c 'import asyncio, json; from schwab_readonly_mcp import auth; from schwab_readonly_mcp.client import SchwabClient; import os; cid=os.environ["SCHWAB_CLIENT_ID"]; csec=os.environ["SCHWAB_CLIENT_SECRET"]; tok=asyncio.run(auth.get_access_token(cid, csec)); data=asyncio.run(SchwabClient(tok).list_accounts()); s=json.dumps(data, indent=2); print(s[:2000] + ("\n... [truncated]" if len(s) > 2000 else ""))'
+   ```
+
+### Wire into Claude Code
+
+Register the server with your MCP-aware client (e.g. add an entry to Claude Code's `.claude/settings.json`). The server's runtime needs `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` in its environment (to refresh access tokens); the refresh token itself stays in the Keychain.
+
+```json
+{
+  "mcpServers": {
+    "schwab-readonly": {
+      "command": "uv",
+      "args": ["run", "schwab-readonly-mcp"],
+      "cwd": "/absolute/path/to/schwab-readonly-mcp",
+      "env": {
+        "SCHWAB_CLIENT_ID": "...",
+        "SCHWAB_CLIENT_SECRET": "..."
+      }
+    }
+  }
+}
 ```
 
-Then register with your MCP-aware client (e.g. add an entry to Claude Code's `.claude/settings.json`).
+### Re-authorizing
+
+Schwab refresh tokens expire after **7 days**. The server refreshes the short-lived access token transparently, but if the server goes unused for 7+ days the refresh token lapses and the next call fails. Re-run the one-time OAuth flow above (`scripts/authorize.py`) to mint a fresh pair.
 
 ## Updating dependencies
 
