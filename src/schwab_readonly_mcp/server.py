@@ -17,7 +17,7 @@ def _credentials() -> tuple[str, str]:
     if not client_id or not client_secret:
         raise RuntimeError(
             "SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET must be set; "
-            "run scripts/authorize.py / export them"
+            "export them (from the Schwab Developer Portal)"
         )
     return client_id, client_secret
 

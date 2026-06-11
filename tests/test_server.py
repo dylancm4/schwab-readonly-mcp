@@ -1,9 +1,12 @@
 import os
+from importlib.metadata import entry_points
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+import respx
 
-from schwab_readonly_mcp import server
+from schwab_readonly_mcp import client, server
 
 EXPECTED_TOOLS = {
     "list_accounts",
@@ -37,6 +40,18 @@ class TestServerToolSurface:
             if any(bad in name.lower() for bad in WRITE_SUBSTRINGS)
         }
         assert not offenders, f"write-capable tool name(s) exposed: {sorted(offenders)}"
+
+
+class TestConsoleScriptEntryPoint:
+    def test_entry_point_resolves_to_mcp_run(self):
+        # pyproject wires the installed `schwab-readonly-mcp` command (and the
+        # README .mcp.json) to "schwab_readonly_mcp.server:mcp.run". A rename of
+        # the module-level `mcp` would break that at runtime only — pin that the
+        # entry point exists and resolves to the real server's run method.
+        (ep,) = entry_points(group="console_scripts", name="schwab-readonly-mcp")
+        run = ep.load()
+        assert callable(run)
+        assert run == server.mcp.run
 
 
 def _patched_client():
@@ -102,6 +117,28 @@ class TestServerDispatch:
         fake.get_price_history.assert_awaited_once_with("AAPL", "day", 1, "minute", 5)
 
 
+class TestAuthClientSeam:
+    # The dispatch tests above replace _client() wholesale, so nothing there can
+    # see WHICH value the real _client() hands to SchwabClient. This is the one
+    # test that executes the real _client(): it pins that the token returned by
+    # auth.get_access_token — not the client_id, not "" — is the exact Bearer
+    # credential on the wire, and that the credentials tuple feeds the getter.
+
+    @respx.mock
+    async def test_access_token_from_auth_becomes_bearer_credential(self):
+        route = respx.get(f"{client.BASE_URL}/trader/v1/accounts").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        creds = patch.object(server, "_credentials", return_value=("cid", "csec"))
+        getter = AsyncMock(return_value="TOK")
+        with creds, patch.object(server.auth, "get_access_token", getter):
+            result = await server.list_accounts()
+        assert result == []
+        getter.assert_awaited_once_with("cid", "csec")
+        req = route.calls.last.request
+        assert req.headers["authorization"] == "Bearer TOK"
+
+
 class TestCredentials:
     # _credentials() is the security-relevant credential gate. Pin that it raises
     # a CLEAR RuntimeError (never a raw KeyError) on missing/empty/partial config
@@ -138,23 +175,23 @@ class TestCredentials:
 
 class TestErrorPropagation:
     # LOCKED decision: auth/client errors propagate UNCAUGHT (re-stringifying could
-    # leak a secret). Pin that a tool surfaces NO secret substring, and — on the
-    # direct module-fn path — that the secret-bearing exception chain stays severed.
+    # leak a secret). Pin IDENTITY on the direct module-fn path (the very object the
+    # mock raised, unwrapped and unmodified — a wrap/re-stringify would fail it) and
+    # that the secret-bearing exception chain stays severed.
 
     async def test_scrubbed_runtime_error_propagates_without_secret(self):
-        secret = "super-secret-refresh-token"
+        sentinel_err = RuntimeError("Schwab API returned HTTP 401")
         creds = patch.object(server, "_credentials", return_value=("cid", "csec"))
         getter = patch.object(
-            server.auth,
-            "get_access_token",
-            AsyncMock(side_effect=RuntimeError("Schwab API returned HTTP 401")),
+            server.auth, "get_access_token", AsyncMock(side_effect=sentinel_err)
         )
         with creds, getter:
             with pytest.raises(RuntimeError) as excinfo:
                 await server.list_accounts()
         exc = excinfo.value
-        assert secret not in str(exc)
-        assert secret not in repr(exc)
+        # Propagates UNCAUGHT and UNMODIFIED: the exact object, never a rebuilt
+        # message that could embed a secret.
+        assert exc is sentinel_err
         # Direct module-fn path: nothing re-raises, so the chain to any
         # secret-bearing error must stay None.
         assert exc.__context__ is None
@@ -165,46 +202,43 @@ class TestErrorPropagation:
         # real protocol surface is mcp.call_tool(...), where FastMCP's Tool.run wraps
         # our scrubbed error via `raise ToolError(...) from e`. That re-link is a
         # transitive property of a pinned third-party f-string; pin it here so a
-        # future mcp bump that embeds repr(e)/args/the original exception (or surfaces
-        # a link still carrying the live .request) fails the build.
-        secret = "super-secret-refresh-token"
+        # future mcp bump that surfaces a link still carrying the live .request, or
+        # rebuilds (rather than links) our scrubbed error, fails the build.
+        sentinel_err = RuntimeError("Schwab API returned HTTP 401")
         creds = patch.object(server, "_credentials", return_value=("cid", "csec"))
         getter = patch.object(
-            server.auth,
-            "get_access_token",
-            AsyncMock(side_effect=RuntimeError("Schwab API returned HTTP 401")),
+            server.auth, "get_access_token", AsyncMock(side_effect=sentinel_err)
         )
         with creds, getter:
             with pytest.raises(Exception) as excinfo:  # noqa: PT011 - walking the chain
                 await server.mcp.call_tool("list_accounts", {})
         # Walk the FULL exception chain (the wrapper plus every __context__/__cause__
-        # link). No link may carry the secret via str/repr, and none may expose a
-        # non-None .request attribute (that would be a live secret-bearing httpx req).
+        # link). No link may expose a non-None .request attribute (that would be a
+        # live secret-bearing httpx req), and our scrubbed error must appear in the
+        # chain as the SAME object the tool raised — unmodified.
         exc = excinfo.value
         seen = set()
+        found_sentinel = False
         while exc is not None and id(exc) not in seen:
             seen.add(id(exc))
-            assert secret not in str(exc)
-            assert secret not in repr(exc)
             assert getattr(exc, "request", None) is None
+            found_sentinel = found_sentinel or exc is sentinel_err
             exc = exc.__cause__ or exc.__context__
+        assert found_sentinel
 
     async def test_secret_bearing_value_error_not_leaked(self):
-        secret = "leak-me-if-you-can"
+        # A ValueError on the auth path must also surface as the exact object —
+        # a future edit that re-stringified the underlying error would fail here.
+        sentinel_err = ValueError("token endpoint returned invalid token")
         creds = patch.object(server, "_credentials", return_value=("cid", "csec"))
-        # A ValueError whose message would carry the secret IF a future edit
-        # re-stringified the underlying error. The scrubbed surface must not.
         getter = patch.object(
-            server.auth,
-            "get_access_token",
-            AsyncMock(side_effect=ValueError("token endpoint returned invalid token")),
+            server.auth, "get_access_token", AsyncMock(side_effect=sentinel_err)
         )
         with creds, getter:
             with pytest.raises(ValueError) as excinfo:
                 await server.get_quotes(["AAPL"])
         exc = excinfo.value
-        assert secret not in str(exc)
-        assert secret not in repr(exc)
+        assert exc is sentinel_err
         assert exc.__context__ is None
         assert exc.__cause__ is None
 
@@ -235,6 +269,15 @@ class TestToolInputSchemas:
             "end_date",
         }
 
+    async def test_get_account_required_set(self):
+        schema = (await self._schemas())["get_account"]
+        assert set(schema["required"]) == {"account_number"}
+
+    async def test_list_accounts_requires_nothing(self):
+        # Full symmetry: every tool's required set is pinned.
+        schema = (await self._schemas())["list_accounts"]
+        assert set(schema.get("required", [])) == set()
+
     async def test_get_quotes_symbols_is_array(self):
         schema = (await self._schemas())["get_quotes"]
         assert schema["properties"]["symbols"]["type"] == "array"
@@ -248,3 +291,11 @@ class TestToolInputSchemas:
         assert prop["default"] is True
         # An optional flag must never be required.
         assert "include_positions" not in schema.get("required", [])
+
+    async def test_no_tool_has_constraining_output_schema(self):
+        # Pins the LOCKED decision: `-> object` means FastMCP emits NO output
+        # schema, so raw JSON of any shape (e.g. list_accounts' array) passes
+        # through unvalidated. A future annotation like `-> dict` would emit a
+        # constraining schema and break list-shaped responses at runtime.
+        for tool in await server.mcp.list_tools():
+            assert tool.outputSchema is None, tool.name
