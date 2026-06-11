@@ -90,7 +90,9 @@ def parse_callback(raw_path: str, expected_state: str) -> str:
         raise RuntimeError("OAuth state mismatch: possible CSRF, refusing callback")
     error = (query.get("error") or [""])[0]
     if error:
-        raise RuntimeError(f"Schwab returned an OAuth error: {error}")
+        # !r: the value escapes to the operator's terminal — repr-quote it so
+        # ANSI/control bytes can't inject terminal escapes.
+        raise RuntimeError(f"Schwab returned an OAuth error: {error!r}")
     code = (query.get("code") or [""])[0]
     if not code:
         raise RuntimeError("OAuth callback missing authorization code")
@@ -153,7 +155,16 @@ def _capture_callback(context: ssl.SSLContext) -> str:
     Binds to loopback only, wraps the socket in TLS, stops at the first
     completed request. Returns the raw request path (with query string).
     """
-    httpd = http.server.HTTPServer((HOST, PORT), _CallbackHandler)
+    try:
+        httpd = http.server.HTTPServer((HOST, PORT), _CallbackHandler)
+    except OSError:
+        # Wedged prior run / another local service on the port: an operator-
+        # environment error → actionable SystemExit, not a raw EADDRINUSE
+        # traceback (convention shared with _require_credentials/_require_cert).
+        raise SystemExit(
+            f"error: {HOST}:{PORT} is already in use; "
+            "close the process holding it and re-run."
+        ) from None
     httpd.callback_path = None  # type: ignore[attr-defined]
     httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
     try:

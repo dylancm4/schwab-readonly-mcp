@@ -1,3 +1,4 @@
+import errno
 import http.server
 import importlib.util
 import os
@@ -88,8 +89,21 @@ class TestParseCallback:
             authorize.parse_callback("/?error=denied&state=WRONG", "STATE")
 
     def test_raises_on_schwab_error_param(self):
-        with pytest.raises(RuntimeError, match="OAuth error: access_denied"):
+        # !r form: the value is repr-quoted so control bytes can't reach the
+        # terminal raw (see the escape-injection test below).
+        with pytest.raises(RuntimeError, match="OAuth error: 'access_denied'"):
             authorize.parse_callback("/?error=access_denied&state=STATE", "STATE")
+
+    def test_error_param_control_chars_not_echoed_raw(self):
+        # Defense-in-depth: the error param is attacker-influenced text that
+        # escapes to the operator's terminal; ANSI/control bytes (ESC, BEL)
+        # must surface repr-escaped, never raw terminal-escape injection.
+        with pytest.raises(RuntimeError) as excinfo:
+            authorize.parse_callback("/?error=%1B%5D0%3Bpwned%07&state=STATE", "STATE")
+        message = str(excinfo.value)
+        assert "\x1b" not in message
+        assert "\x07" not in message
+        assert "\\x1b" in message  # repr-escaped, still diagnosable
 
     def test_raises_on_missing_code(self):
         with pytest.raises(RuntimeError, match="missing authorization code"):
@@ -176,6 +190,20 @@ class TestRequireCert:
 
 
 class TestCaptureCallback:
+    def test_port_already_in_use_exits_with_actionable_message(self, monkeypatch):
+        # A wedged prior run / another local service on 8182 is an operator-
+        # environment error: SystemExit with a clear message, never a raw
+        # OSError(EADDRINUSE) traceback. Nothing secret exists at this point.
+        def busy_init(self, *args: object, **kwargs: object) -> None:
+            raise OSError(errno.EADDRINUSE, "Address already in use")
+
+        monkeypatch.setattr(http.server.HTTPServer, "__init__", busy_init)
+        with pytest.raises(SystemExit) as excinfo:
+            authorize._capture_callback(object())
+        message = str(excinfo.value)
+        assert f"{authorize.HOST}:{authorize.PORT}" in message
+        assert "already in use" in message
+
     def test_survives_aborted_tls_handshake_then_returns_real_callback(
         self, tmp_path, monkeypatch, capfd
     ):
