@@ -3,6 +3,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 import respx
+from conftest import assert_chain_carries_no, assert_hardened_client_kwargs
 
 from schwab_readonly_mcp import client
 
@@ -75,30 +76,30 @@ class TestListAccounts:
         with pytest.raises(RuntimeError):
             await c.list_accounts()
 
+    # Parametrized over both scrubbed_http_error branches (status error and
+    # transport errors): invariant 3 covers "network failures", so a branch-
+    # specific regression (e.g. a chained re-raise for TransportError only)
+    # must fail here too.
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"return_value": httpx.Response(401, json={"error": "boom"})},
+            {"side_effect": httpx.ConnectError("down")},
+            {"side_effect": httpx.ReadTimeout("slow")},
+        ],
+        ids=["http_401", "connect_error", "read_timeout"],
+    )
     @respx.mock
-    async def test_http_error_does_not_leak_bearer_token(self):
+    async def test_http_error_does_not_leak_bearer_token(self, failure):
         # The teeth: the raised error must not carry the Bearer token that the
         # secret-bearing request headers would expose — not only in str/repr, but
         # anywhere reachable by walking the exception chain (__context__/__cause__)
         # down to a retained httpx request's headers/body.
-        respx.get(ACCOUNTS_URL).mock(
-            return_value=httpx.Response(401, json={"error": "boom"})
-        )
+        respx.get(ACCOUNTS_URL).mock(**failure)
         c = client.SchwabClient("SUPERSECRET")
         with pytest.raises(RuntimeError) as excinfo:
             await c.list_accounts()
-        exc = excinfo.value
-        assert exc.__context__ is None
-        assert exc.__cause__ is None
-        seen, cur = [], exc
-        while cur is not None and cur not in seen:
-            seen.append(cur)
-            text = repr(cur) + str(cur)
-            req = getattr(cur, "request", None)
-            if req is not None:
-                text += repr(dict(req.headers)) + req.content.decode("utf-8", "replace")
-            assert "SUPERSECRET" not in text
-            cur = cur.__context__ or cur.__cause__
+        assert_chain_carries_no(excinfo.value, "SUPERSECRET")
 
     @respx.mock
     async def test_raises_on_non_json_body(self):
@@ -113,6 +114,24 @@ class TestListAccounts:
         c = client.SchwabClient("TOKEN")
         with pytest.raises(ValueError):
             await c.list_accounts()
+
+    @respx.mock
+    async def test_non_json_body_error_carries_no_body_text(self):
+        # A 200 with a truncated-yet-account-data-bearing body must not be
+        # reachable from the raised error: json.JSONDecodeError retains the FULL
+        # raw body on .doc, so it must be replaced and the chain severed, same
+        # as httpx errors (parity with auth.py's token-endpoint scrub).
+        respx.get(ACCOUNTS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b'[{"accountNumber": "LEAKED_BODY_FRAGMENT',
+                headers={"content-type": "application/json"},
+            )
+        )
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(ValueError) as excinfo:
+            await c.list_accounts()
+        assert_chain_carries_no(excinfo.value, "LEAKED_BODY_FRAGMENT")
 
     @respx.mock
     async def test_does_not_follow_redirect_to_other_endpoint(self):
@@ -144,17 +163,7 @@ class TestListAccounts:
                 respx.get(ACCOUNTS_URL).mock(return_value=httpx.Response(200, json=[]))
                 await client.SchwabClient("TOKEN").list_accounts()
 
-        assert captured["trust_env"] is False
-        assert captured["follow_redirects"] is False
-        # finite timeout — isinstance alone would also pass httpx.Timeout(None).
-        timeout = captured["timeout"]
-        assert isinstance(timeout, httpx.Timeout)
-        assert timeout.read == 10.0
-        assert timeout.connect == 5.0
-        # The positional 10.0 sets all four — pin write/pool too so a refactor to
-        # Timeout(connect=5.0, read=10.0) can't silently leave them infinite.
-        assert timeout.write == 10.0
-        assert timeout.pool == 10.0
+        assert_hardened_client_kwargs(captured)
 
 
 class TestGetAccount:

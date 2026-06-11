@@ -9,6 +9,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 import respx
+from conftest import assert_chain_carries_no, assert_hardened_client_kwargs
 
 from schwab_readonly_mcp import auth
 
@@ -230,6 +231,26 @@ class TestStoreLoadTokens:
             with pytest.raises(RuntimeError, match="corrupt"):
                 auth.load_tokens()
 
+    @pytest.mark.parametrize("field", ["access_token", "refresh_token"])
+    def test_load_raises_clear_error_on_empty_token(self, field):
+        # store_tokens can never write "" (values pass _require_str), so an
+        # empty entry is hand-edited/corrupted Keychain state — loud-fail like
+        # the non-int expiry, not an opaque Schwab 401 later.
+        stored = {
+            "access_token": "A",
+            "refresh_token": "R",
+            "access_expires_at": "1700000000",
+        }
+        stored[field] = ""
+
+        with patch.object(
+            auth.keyring,
+            "get_password",
+            side_effect=lambda s, k: stored.get(k),
+        ):
+            with pytest.raises(RuntimeError, match="corrupt"):
+                auth.load_tokens()
+
 
 def _expected_basic_auth(client_id: str, client_secret: str) -> str:
     raw = f"{client_id}:{client_secret}".encode()
@@ -298,32 +319,38 @@ class TestExchangeCodeForTokens:
                 "CODE", "cid", "csec", "https://127.0.0.1:8182"
             )
 
+    # Parametrized over both scrubbed_http_error branches (status error and
+    # transport errors): invariant 3 covers "network failures", so a branch-
+    # specific regression (e.g. a chained re-raise for TransportError only)
+    # must fail here too.
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"return_value": httpx.Response(400, json={"error": "boom"})},
+            {"side_effect": httpx.ConnectError("down")},
+            {"side_effect": httpx.ReadTimeout("slow")},
+        ],
+        ids=["http_400", "connect_error", "read_timeout"],
+    )
     @respx.mock
-    async def test_http_error_does_not_leak_credentials_or_code(self):
+    async def test_http_error_does_not_leak_credentials_or_code(self, failure):
         # The teeth: the raised error must not carry the Basic credentials or the
         # authorization code that the secret-bearing request would expose — not
         # only in str/repr, but anywhere reachable by walking the exception chain
         # (__context__/__cause__) down to a retained httpx request's headers/body.
-        respx.post(auth.TOKEN_URL).mock(
-            return_value=httpx.Response(400, json={"error": "boom"})
-        )
+        respx.post(auth.TOKEN_URL).mock(**failure)
         with pytest.raises(RuntimeError) as excinfo:
             await auth.exchange_code_for_tokens(
                 "THECODE", "cid", "SUPERSECRET", "https://127.0.0.1:8182"
             )
-        exc = excinfo.value
-        assert exc.__context__ is None
-        assert exc.__cause__ is None
-        seen, cur = [], exc
-        while cur is not None and cur not in seen:
-            seen.append(cur)
-            text = repr(cur) + str(cur)
-            req = getattr(cur, "request", None)
-            if req is not None:
-                text += repr(dict(req.headers)) + req.content.decode("utf-8", "replace")
-            for leaked in ("SUPERSECRET", "THECODE"):
-                assert leaked not in text
-            cur = cur.__context__ or cur.__cause__
+        # Include the base64-encoded Basic form: a retained Authorization header
+        # would carry the credentials encoded, invisible to the literal checks.
+        assert_chain_carries_no(
+            excinfo.value,
+            "SUPERSECRET",
+            "THECODE",
+            _expected_basic_auth("cid", "SUPERSECRET"),
+        )
 
     # Kept distinct from test_raises_on_invalid_payload_field: both end in a
     # ValueError from _require_str (access_token/refresh_token) or _require_int
@@ -388,6 +415,36 @@ class TestExchangeCodeForTokens:
             await auth.exchange_code_for_tokens(
                 "CODE", "cid", "csec", "https://127.0.0.1:8182"
             )
+
+    @pytest.mark.parametrize("body", [[], "oops", 123], ids=["array", "string", "int"])
+    @respx.mock
+    async def test_raises_on_non_object_json_body(self, body):
+        # A 200 carrying valid JSON that is not an object must hit the module's
+        # loud-fail ValueError contract, never an AttributeError from
+        # payload.get downstream.
+        respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=body))
+        with pytest.raises(ValueError, match="non-JSON-object"):
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
+
+    @respx.mock
+    async def test_non_json_body_error_carries_no_body_text(self):
+        # A 200 with malformed-yet-token-bearing JSON must not be reachable from
+        # the raised error: json.JSONDecodeError retains the FULL raw body on
+        # .doc, so it must be replaced and the chain severed, same as httpx errors.
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b'{"access_token": "LEAKED_TOKEN_FRAGMENT',
+                headers={"content-type": "application/json"},
+            )
+        )
+        with pytest.raises(ValueError) as excinfo:
+            await auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            )
+        assert_chain_carries_no(excinfo.value, "LEAKED_TOKEN_FRAGMENT")
 
 
 class TestRefreshAccessToken:
@@ -487,30 +544,36 @@ class TestRefreshAccessToken:
         with pytest.raises(RuntimeError):
             await auth.refresh_access_token("RT", "cid", "csec")
 
+    # Parametrized over both scrubbed_http_error branches (status error and
+    # transport errors): invariant 3 covers "network failures", so a branch-
+    # specific regression (e.g. a chained re-raise for TransportError only)
+    # must fail here too.
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"return_value": httpx.Response(400, json={"error": "boom"})},
+            {"side_effect": httpx.ConnectError("down")},
+            {"side_effect": httpx.ReadTimeout("slow")},
+        ],
+        ids=["http_400", "connect_error", "read_timeout"],
+    )
     @respx.mock
-    async def test_http_error_does_not_leak_credentials_or_refresh_token(self):
+    async def test_http_error_does_not_leak_credentials_or_refresh_token(self, failure):
         # The teeth: the raised error must not carry the Basic credentials or the
         # refresh token that the secret-bearing request would expose — not only in
         # str/repr, but anywhere reachable by walking the exception chain
         # (__context__/__cause__) down to a retained httpx request's headers/body.
-        respx.post(auth.TOKEN_URL).mock(
-            return_value=httpx.Response(400, json={"error": "boom"})
-        )
+        respx.post(auth.TOKEN_URL).mock(**failure)
         with pytest.raises(RuntimeError) as excinfo:
             await auth.refresh_access_token("RT_SUPERSECRET", "cid", "CSEC_SECRET")
-        exc = excinfo.value
-        assert exc.__context__ is None
-        assert exc.__cause__ is None
-        seen, cur = [], exc
-        while cur is not None and cur not in seen:
-            seen.append(cur)
-            text = repr(cur) + str(cur)
-            req = getattr(cur, "request", None)
-            if req is not None:
-                text += repr(dict(req.headers)) + req.content.decode("utf-8", "replace")
-            for leaked in ("RT_SUPERSECRET", "CSEC_SECRET"):
-                assert leaked not in text
-            cur = cur.__context__ or cur.__cause__
+        # Include the base64-encoded Basic form: a retained Authorization header
+        # would carry the credentials encoded, invisible to the literal checks.
+        assert_chain_carries_no(
+            excinfo.value,
+            "RT_SUPERSECRET",
+            "CSEC_SECRET",
+            _expected_basic_auth("cid", "CSEC_SECRET"),
+        )
 
     # Kept distinct from test_raises_on_invalid_payload_field: both end in a
     # ValueError from _require_str (access_token/refresh_token) or _require_int
@@ -566,6 +629,32 @@ class TestRefreshAccessToken:
         )
         with pytest.raises(ValueError):
             await auth.refresh_access_token("RT", "cid", "csec")
+
+    @pytest.mark.parametrize("body", [[], "oops", 123], ids=["array", "string", "int"])
+    @respx.mock
+    async def test_raises_on_non_object_json_body(self, body):
+        # A 200 carrying valid JSON that is not an object must hit the module's
+        # loud-fail ValueError contract, never an AttributeError from
+        # payload.get downstream.
+        respx.post(auth.TOKEN_URL).mock(return_value=httpx.Response(200, json=body))
+        with pytest.raises(ValueError, match="non-JSON-object"):
+            await auth.refresh_access_token("RT", "cid", "csec")
+
+    @respx.mock
+    async def test_non_json_body_error_carries_no_body_text(self):
+        # A 200 with malformed-yet-token-bearing JSON must not be reachable from
+        # the raised error: json.JSONDecodeError retains the FULL raw body on
+        # .doc, so it must be replaced and the chain severed, same as httpx errors.
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b'{"access_token": "LEAKED_TOKEN_FRAGMENT',
+                headers={"content-type": "application/json"},
+            )
+        )
+        with pytest.raises(ValueError) as excinfo:
+            await auth.refresh_access_token("RT", "cid", "csec")
+        assert_chain_carries_no(excinfo.value, "LEAKED_TOKEN_FRAGMENT")
 
 
 class TestGetAccessToken:
@@ -695,7 +784,12 @@ class TestGetAccessToken:
 
         route = respx.post(auth.TOKEN_URL).mock(side_effect=slow_refresh)
 
+        # The module-level lock lazily binds to the first event loop that awaits it;
+        # pytest-asyncio gives each test a fresh loop, so swap in a lock bound to THIS
+        # loop. Order-independent.
+        fresh_lock = asyncio.Lock()
         with (
+            patch.object(auth, "_refresh_lock", fresh_lock),
             patch.object(auth.keyring, "set_password", side_effect=fake_set),
             patch.object(auth.keyring, "get_password", side_effect=fake_get),
             patch.object(auth.time, "time", return_value=self.NOW),
@@ -823,14 +917,33 @@ class TestTransportHardening:
         with patch.object(auth.httpx, "AsyncClient", side_effect=spy):
             await invoke()
 
-        assert captured["trust_env"] is False
-        assert captured["follow_redirects"] is False
-        # finite timeout — isinstance alone would also pass httpx.Timeout(None).
-        timeout = captured["timeout"]
-        assert isinstance(timeout, httpx.Timeout)
-        assert timeout.read == 10.0
-        assert timeout.connect == 5.0
-        # The positional 10.0 sets all four — pin write/pool too so a refactor to
-        # Timeout(connect=5.0, read=10.0) can't silently leave them infinite.
-        assert timeout.write == 10.0
-        assert timeout.pool == 10.0
+        assert_hardened_client_kwargs(captured)
+
+    @pytest.mark.parametrize(
+        "invoke",
+        [
+            lambda: auth.exchange_code_for_tokens(
+                "CODE", "cid", "csec", "https://127.0.0.1:8182"
+            ),
+            lambda: auth.refresh_access_token("RT", "cid", "csec"),
+        ],
+        ids=["exchange", "refresh"],
+    )
+    @respx.mock
+    async def test_does_not_follow_redirect_to_other_endpoint(self, invoke):
+        # Behavioral teeth for the no-redirect invariant (parity with client.py):
+        # the construction-contract kwarg spy can't see a per-request
+        # follow_redirects override on client.post, and a followed 307/308 would
+        # re-POST the Basic creds + grant secret to the new location.
+        respx.post(auth.TOKEN_URL).mock(
+            return_value=httpx.Response(
+                302,
+                headers={"Location": "https://api.schwabapi.com/v1/oauth/elsewhere"},
+            )
+        )
+        target = respx.route(url="https://api.schwabapi.com/v1/oauth/elsewhere").mock(
+            return_value=httpx.Response(200, json={"leaked": True})
+        )
+        with pytest.raises(RuntimeError, match="HTTP 302"):
+            await invoke()
+        assert target.called is False

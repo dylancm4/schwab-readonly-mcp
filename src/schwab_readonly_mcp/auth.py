@@ -21,7 +21,7 @@ _refresh_lock = asyncio.Lock()
 class Secret:
     __slots__ = ("_value",)
 
-    def __init__(self, value: str) -> None:
+    def __init__(self, value: str | Secret) -> None:
         # Unwrap a stray double-wrap so reveal() always returns the raw value,
         # never a nested Secret.
         if isinstance(value, Secret):
@@ -82,6 +82,11 @@ def load_tokens() -> TokenSet:
     expires = keyring.get_password(SERVICE, "access_expires_at")
     if access is None or refresh is None or expires is None:
         raise RuntimeError("No tokens stored: run scripts/authorize.py first")
+    if not access or not refresh:
+        # store_tokens can never write "" (_require_str rejects it), so an empty
+        # entry is hand-edited/corrupted Keychain state — fail loud here, not as
+        # an opaque Schwab 401 later.
+        raise RuntimeError("corrupt tokens: re-run scripts/authorize.py")
     try:
         expires_at = int(expires)
     except ValueError:
@@ -124,9 +129,11 @@ def _require_int(payload: dict[str, object], key: str) -> int:
     return value
 
 
-async def exchange_code_for_tokens(
-    code: str, client_id: str, client_secret: str, redirect_uri: str
-) -> TokenSet:
+async def _post_token_request(
+    data: dict[str, str], client_id: str, client_secret: str
+) -> dict[str, object]:
+    # The single hardened POST both token-endpoint functions share, so the
+    # scrub logic has exactly one copy a future fix can land in.
     async with httpx.AsyncClient(
         trust_env=False,
         timeout=httpx.Timeout(10.0, connect=5.0),
@@ -136,26 +143,46 @@ async def exchange_code_for_tokens(
     ) as client:
         try:
             response = await client.post(
-                TOKEN_URL,
-                auth=(client_id, client_secret),
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                },
+                TOKEN_URL, auth=(client_id, client_secret), data=data
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
             # Build the scrubbed error here, but raise it OUTSIDE the except
             # block (after the `with`): with no active exception at the raise
             # site its __context__ stays None, so the live request carrying the
-            # Basic creds + OAuth code can't be reached via the exception chain.
+            # Basic creds + grant secret (OAuth code / refresh token) can't be
+            # reached via the exception chain.
             error = scrubbed_http_error(e)
         else:
-            payload = response.json()
-            error = None
-    if error is not None:
-        raise error
+            try:
+                payload = response.json()
+            except ValueError:
+                # json.JSONDecodeError retains the FULL raw body on .doc, which
+                # on this endpoint can carry token material. Replace it; the
+                # raise below (outside the except) keeps the chain severed.
+                error = ValueError("token endpoint returned non-JSON body")
+            else:
+                if isinstance(payload, dict):
+                    return payload
+                # Valid JSON but not an object (e.g. [] or "x"): keep the
+                # module's loud ValueError contract instead of an
+                # AttributeError from payload.get downstream.
+                error = ValueError("token endpoint returned non-JSON-object body")
+    raise error
+
+
+async def exchange_code_for_tokens(
+    code: str, client_id: str, client_secret: str, redirect_uri: str
+) -> TokenSet:
+    payload = await _post_token_request(
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+        client_id,
+        client_secret,
+    )
     return TokenSet(
         access_token=Secret(_require_str(payload, "access_token")),
         refresh_token=Secret(_require_str(payload, "refresh_token")),
@@ -166,31 +193,11 @@ async def exchange_code_for_tokens(
 async def refresh_access_token(
     refresh_token: str, client_id: str, client_secret: str
 ) -> TokenSet:
-    async with httpx.AsyncClient(
-        trust_env=False,
-        timeout=httpx.Timeout(10.0, connect=5.0),
-        # read-only: never auto-follow a redirect off the fixed token endpoint
-        # (parity with client.py; makes the invariant explicit, not default-dependent).
-        follow_redirects=False,
-    ) as client:
-        try:
-            response = await client.post(
-                TOKEN_URL,
-                auth=(client_id, client_secret),
-                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as e:
-            # Build the scrubbed error here, but raise it OUTSIDE the except
-            # block (after the `with`): with no active exception at the raise
-            # site its __context__ stays None, so the live request carrying the
-            # Basic creds + refresh token can't be reached via the exception chain.
-            error = scrubbed_http_error(e)
-        else:
-            payload = response.json()
-            error = None
-    if error is not None:
-        raise error
+    payload = await _post_token_request(
+        {"grant_type": "refresh_token", "refresh_token": refresh_token},
+        client_id,
+        client_secret,
+    )
     new_rt = payload.get("refresh_token") or refresh_token
     if not isinstance(new_rt, str) or not new_rt:
         raise ValueError("token endpoint returned invalid refresh_token")

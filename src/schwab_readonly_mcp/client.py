@@ -55,7 +55,15 @@ class SchwabClient:
                 # request can't be reached by a crash reporter walking the chain.
                 error = scrubbed_http_error(e)
             else:
-                return response.json()
+                try:
+                    payload = response.json()
+                except ValueError:
+                    # json.JSONDecodeError retains the FULL raw body on .doc,
+                    # which here can carry account data. Replace it; the raise
+                    # below (outside the except) keeps the chain severed.
+                    error = ValueError("Schwab API returned non-JSON body")
+                else:
+                    return payload
         raise error
 
     async def list_accounts(self, include_positions: bool = True) -> object:
