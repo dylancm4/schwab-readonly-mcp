@@ -176,6 +176,39 @@ class TestRequireCredentials:
             assert authorize._require_credentials() == ("cid", "csec")
 
 
+@pytest.fixture
+def self_signed_cert(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    # One-day throwaway localhost cert mirroring the operator's documented
+    # openssl command (plus an IP SAN so a verifying test client can trust it).
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl binary not available")
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return cert, key
+
+
 class TestRequireCert:
     def test_missing_cert_or_key_exits_with_openssl_hint(self, monkeypatch):
         # An absent cert/key is an operator-config error: a clean SystemExit
@@ -187,6 +220,19 @@ class TestRequireCert:
         assert "openssl req" in message
         assert authorize.CERT_FILE in message
         assert authorize.KEY_FILE in message
+
+    def test_happy_path_loads_cert_into_tls_server_context(
+        self, self_signed_cert, monkeypatch
+    ):
+        # The success branch is real logic (server-side protocol selection +
+        # load_cert_chain argument order — swapped certfile/keyfile raises
+        # SSLError here); the live flow is the only other place it executes.
+        cert, key = self_signed_cert
+        monkeypatch.setattr(authorize, "CERT_FILE", str(cert))
+        monkeypatch.setattr(authorize, "KEY_FILE", str(key))
+        context = authorize._require_cert()
+        assert isinstance(context, ssl.SSLContext)
+        assert context.protocol == ssl.PROTOCOL_TLS_SERVER
 
 
 class TestCaptureCallback:
@@ -205,38 +251,13 @@ class TestCaptureCallback:
         assert "already in use" in message
 
     def test_survives_aborted_tls_handshake_then_returns_real_callback(
-        self, tmp_path, monkeypatch, capfd
+        self, self_signed_cert, monkeypatch, capfd
     ):
         # The documented happy path guarantees a non-callback connection: the
         # browser's self-signed-cert interstitial aborts its TLS handshake
         # (speculative preconnects do the same). That abort must not consume
         # the flow's only accept and lose the real callback that follows.
-        openssl = shutil.which("openssl")
-        if openssl is None:
-            pytest.skip("openssl binary not available")
-        cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
-        subprocess.run(
-            [
-                openssl,
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-keyout",
-                str(key),
-                "-out",
-                str(cert),
-                "-days",
-                "1",
-                "-nodes",
-                "-subj",
-                "/CN=127.0.0.1",
-                "-addext",
-                "subjectAltName=IP:127.0.0.1",
-            ],
-            check=True,
-            capture_output=True,
-        )
+        cert, key = self_signed_cert
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=str(cert), keyfile=str(key))
 
