@@ -281,6 +281,21 @@ class TestGetAccount:
         assert_chain_carries_no(excinfo.value, "99999999")
         assert catch.called is False
 
+    @respx.mock
+    async def test_empty_mapping_is_unknown_account_not_malformed(self):
+        # [] is a WELL-FORMED payload (a token with zero accessible trader
+        # accounts), so the lookup must take the non-echoing unknown-account
+        # branch — never the malformed-payload one.
+        _mock_account_numbers([])
+        catch = respx.route().mock(return_value=httpx.Response(200, json={}))
+        c = client.SchwabClient("TOKEN")
+        with pytest.raises(
+            ValueError, match="account_number not found among accessible accounts"
+        ) as excinfo:
+            await c.get_account("42")
+        assert_chain_carries_no(excinfo.value, "42")
+        assert catch.called is False
+
     @pytest.mark.parametrize(
         "mapping",
         [
@@ -321,7 +336,20 @@ class TestGetAccount:
 
     @pytest.mark.parametrize(
         "bad_hash",
-        ["HA/SH42", "HASH42?evil=1", "../HASH42", "HASH42#f", "HA SH42", "", "."],
+        [
+            "HA/SH42",
+            "HASH42?evil=1",
+            "../HASH42",
+            "HASH42#f",
+            "HA SH42",
+            # pin the same denylist classes as the user-input path: percent,
+            # backslash, and control chars (NUL is not isspace()).
+            "HASH%2e42",
+            "HASH\\42",
+            "HASH\x0042",
+            "",
+            ".",
+        ],
     )
     @respx.mock
     async def test_unsafe_hash_value_from_api_is_rejected(self, bad_hash):

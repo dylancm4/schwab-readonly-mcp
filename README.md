@@ -20,7 +20,7 @@ This server is structured so that three properties are mechanically verifiable, 
 2. **No tokens on disk.** OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep -nE "open\(|with open" src/schwab_readonly_mcp/auth.py` (zero matches).
 3. **Pinned, hash-locked dependencies.** `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
 
-Total source: roughly 500 lines across three modules (`auth.py`, `client.py`, `server.py`), plus a ~220-line one-time authorization script (`scripts/authorize.py`). The point is that one person can read all of it in an afternoon.
+Total source: roughly 500 lines across three modules (`auth.py`, `client.py`, `server.py`), plus a ~235-line one-time authorization script (`scripts/authorize.py`). The point is that one person can read all of it in an afternoon.
 
 ## Dependencies
 

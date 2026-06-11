@@ -322,6 +322,15 @@ class TestToolInputSchemas:
         # An optional filter must never be required.
         assert "types" not in schema["required"]
 
+    async def test_get_transactions_description_lists_full_enum(self):
+        # The docstring's prose enum is the copy LLM clients actually see
+        # (FastMCP publishes it verbatim as tool.description) and is pinned by
+        # nothing else — an enum edit that skips the docstring must fail here.
+        tools = {t.name: t for t in await server.mcp.list_tools()}
+        description = tools["get_transactions"].description
+        for value in client.ALL_TRANSACTION_TYPES.split(","):
+            assert value in description, value
+
     async def test_get_account_required_set(self):
         schema = (await self._schemas())["get_account"]
         assert set(schema["required"]) == {"account_number"}
