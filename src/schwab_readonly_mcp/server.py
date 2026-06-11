@@ -3,7 +3,7 @@ import os
 from mcp.server.fastmcp import FastMCP
 
 from schwab_readonly_mcp import auth
-from schwab_readonly_mcp.client import SchwabClient
+from schwab_readonly_mcp.client import ALL_TRANSACTION_TYPES, SchwabClient
 
 mcp = FastMCP("schwab-readonly")
 
@@ -34,12 +34,18 @@ async def _client() -> SchwabClient:
 
 # Each tool mirrors the SchwabClient method signature exactly (param names,
 # types, defaults) so FastMCP's auto-generated input schema is correct, and
-# returns the raw parsed JSON (-> object → no constraining output schema).
+# returns the parsed JSON (-> object → no constraining output schema) — raw,
+# except: Schwab returns a top-level ARRAY from the accounts and transactions
+# endpoints, and FastMCP serializes a list result as one content block PER
+# element, so a naive MCP client reading only the first block silently sees
+# one account instead of six. Those two tools wrap the raw result in a stable
+# single-key envelope ({"accounts": ...} / {"transactions": ...}) —
+# unconditionally, never type-sniffed, so the shape is a stable schema.
 
 
 @mcp.tool()
 async def list_accounts(include_positions: bool = True) -> object:
-    return await (await _client()).list_accounts(include_positions)
+    return {"accounts": await (await _client()).list_accounts(include_positions)}
 
 
 @mcp.tool()
@@ -49,11 +55,23 @@ async def get_account(account_number: str, include_positions: bool = True) -> ob
 
 @mcp.tool()
 async def get_transactions(
-    account_number: str, start_date: str, end_date: str
+    account_number: str,
+    start_date: str,
+    end_date: str,
+    types: str = ALL_TRANSACTION_TYPES,
 ) -> object:
-    return await (await _client()).get_transactions(
-        account_number, start_date, end_date
+    """Transactions for one account over a date range.
+
+    `types` is a comma-separated filter of Schwab transaction types and
+    defaults to all of them (no filtering). Valid values: TRADE,
+    RECEIVE_AND_DELIVER, DIVIDEND_OR_INTEREST, ACH_RECEIPT, ACH_DISBURSEMENT,
+    CASH_RECEIPT, CASH_DISBURSEMENT, ELECTRONIC_FUND, WIRE_OUT, WIRE_IN,
+    JOURNAL, MEMORANDUM, MARGIN_CALL, MONEY_MARKET, SMA_ADJUSTMENT.
+    """
+    transactions = await (await _client()).get_transactions(
+        account_number, start_date, end_date, types
     )
+    return {"transactions": transactions}
 
 
 @mcp.tool()

@@ -20,7 +20,7 @@ This server is structured so that three properties are mechanically verifiable, 
 2. **No tokens on disk.** OAuth tokens (access, refresh, expiry) live only in the macOS Keychain under the service name `schwab-readonly-mcp`. No file-based fallback exists in the source. Verified by `grep -nE "open\(|with open" src/schwab_readonly_mcp/auth.py` (zero matches).
 3. **Pinned, hash-locked dependencies.** `pyproject.toml` uses `==` exact-version pins. `uv.lock` contains SHA-256 hashes for every transitive dependency. `uv sync --frozen` fails if anything has drifted.
 
-Total source: roughly 400 lines across three modules (`auth.py`, `client.py`, `server.py`), plus a ~220-line one-time authorization script (`scripts/authorize.py`). The point is that one person can read all of it in an afternoon.
+Total source: roughly 500 lines across three modules (`auth.py`, `client.py`, `server.py`), plus a ~220-line one-time authorization script (`scripts/authorize.py`). The point is that one person can read all of it in an afternoon.
 
 ## Dependencies
 
@@ -46,11 +46,15 @@ No `schwab-py`, no community Schwab MCPs, no third-party aggregator SDKs.
 
 Exactly five MCP tools are exposed, all read-only:
 
-- `list_accounts`
+- `list_accounts` — returns `{"accounts": [...]}` (envelope, see below).
 - `get_account`
-- `get_transactions`
+- `get_transactions` — accepts an optional `types` filter (comma-separated Schwab transaction types, e.g. `TRADE,DIVIDEND_OR_INTEREST`); it defaults to all 15 types, i.e. no filtering, and is always sent on the wire (the endpoint misbehaves without it). Returns `{"transactions": [...]}` (envelope, see below).
 - `get_quotes`
 - `get_price_history`
+
+The per-account tools (`get_account`, `get_transactions`) take the plaintext account number, but Schwab's per-account endpoints only accept the encrypted account hash — so the client first resolves the number via `GET /trader/v1/accounts/accountNumbers` (another plain GET; the read-only audit promise is unchanged). The number→hash mapping is cached in memory for the life of the client instance only, never written to disk.
+
+Tools return Schwab's parsed JSON unmodified, with one exception: Schwab returns a top-level JSON **array** from the accounts and transactions endpoints, and FastMCP serializes a list-valued tool result as one content block *per element* — a naive MCP client reads only the first block and silently sees one account instead of six. `list_accounts` and `get_transactions` therefore wrap the raw array (intact and in order) in a stable single-key envelope, `{"accounts": [...]}` and `{"transactions": [...]}` respectively, unconditionally. A test in `tests/test_server.py` pins that every tool's result serializes to exactly one content block.
 
 A guardrail test in `tests/test_server.py` asserts this set exactly, and that no tool name contains any case-insensitive substring from `{place, submit, cancel, order, trade, buy, sell}`.
 

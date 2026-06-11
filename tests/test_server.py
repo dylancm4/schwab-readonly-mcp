@@ -74,7 +74,9 @@ class TestServerDispatch:
         fake.list_accounts.return_value = "SENTINEL_LIST"
         with ctx:
             result = await server.list_accounts()
-        assert result == "SENTINEL_LIST"
+        # The envelope wrap is UNCONDITIONAL (no type-sniff), so even a
+        # non-list sentinel must come back wrapped.
+        assert result == {"accounts": "SENTINEL_LIST"}
         fake.list_accounts.assert_awaited_once_with(True)
 
     async def test_get_account_forwards_args_in_order(self):
@@ -96,9 +98,21 @@ class TestServerDispatch:
         ctx, fake = _patched_client()
         fake.get_transactions.return_value = "SENTINEL_TXN"
         with ctx:
-            result = await server.get_transactions("ACC", "s", "e")
-        assert result == "SENTINEL_TXN"
-        fake.get_transactions.assert_awaited_once_with("ACC", "s", "e")
+            result = await server.get_transactions("ACC", "s", "e", "TRADE")
+        # Unconditional envelope, as for list_accounts above.
+        assert result == {"transactions": "SENTINEL_TXN"}
+        fake.get_transactions.assert_awaited_once_with("ACC", "s", "e", "TRADE")
+
+    async def test_get_transactions_default_types_is_full_enum(self):
+        # The tool default must be the client's full 15-value enum join — the
+        # mirrored-signature convention means the same constant, not a copy.
+        ctx, fake = _patched_client()
+        fake.get_transactions.return_value = "SENTINEL_TXN"
+        with ctx:
+            await server.get_transactions("ACC", "s", "e")
+        fake.get_transactions.assert_awaited_once_with(
+            "ACC", "s", "e", client.ALL_TRANSACTION_TYPES
+        )
 
     async def test_get_quotes_forwards_symbols(self):
         ctx, fake = _patched_client()
@@ -117,6 +131,34 @@ class TestServerDispatch:
         fake.get_price_history.assert_awaited_once_with("AAPL", "day", 1, "minute", 5)
 
 
+class TestListEnvelopes:
+    # Schwab returns a top-level ARRAY from the accounts and transactions
+    # endpoints, and FastMCP serializes a list result as one content block PER
+    # element — a naive MCP client reads only the first block and silently
+    # sees one account instead of six. The two list-shaped tools therefore
+    # wrap the raw result in a stable single-key envelope.
+
+    async def test_list_accounts_wraps_raw_list_in_accounts_envelope(self):
+        raw = [{"acct": "1"}, {"acct": "2"}, {"acct": "3"}]
+        ctx, fake = _patched_client()
+        fake.list_accounts.return_value = raw
+        with ctx:
+            result = await server.list_accounts()
+        # The envelope holds the VERY list the client returned — intact and in
+        # order, never copied/filtered/re-sorted.
+        assert result == {"accounts": raw}
+        assert result["accounts"] is raw
+
+    async def test_get_transactions_wraps_raw_list_in_transactions_envelope(self):
+        raw = [{"txn": "1"}, {"txn": "2"}]
+        ctx, fake = _patched_client()
+        fake.get_transactions.return_value = raw
+        with ctx:
+            result = await server.get_transactions("ACC", "s", "e")
+        assert result == {"transactions": raw}
+        assert result["transactions"] is raw
+
+
 class TestAuthClientSeam:
     # The dispatch tests above replace _client() wholesale, so nothing there can
     # see WHICH value the real _client() hands to SchwabClient. This is the one
@@ -133,7 +175,7 @@ class TestAuthClientSeam:
         getter = AsyncMock(return_value="TOK")
         with creds, patch.object(server.auth, "get_access_token", getter):
             result = await server.list_accounts()
-        assert result == []
+        assert result == {"accounts": []}
         getter.assert_awaited_once_with("cid", "csec")
         req = route.calls.last.request
         assert req.headers["authorization"] == "Bearer TOK"
@@ -269,6 +311,17 @@ class TestToolInputSchemas:
             "end_date",
         }
 
+    async def test_get_transactions_types_optional_string_default_all(self):
+        schema = (await self._schemas())["get_transactions"]
+        prop = schema["properties"]["types"]
+        assert prop["type"] == "string"
+        # Default = the client's full enum join: 15 comma-separated values,
+        # so omitting the filter still sends an explicit, complete `types`.
+        assert prop["default"] == client.ALL_TRANSACTION_TYPES
+        assert prop["default"].count(",") == 14
+        # An optional filter must never be required.
+        assert "types" not in schema["required"]
+
     async def test_get_account_required_set(self):
         schema = (await self._schemas())["get_account"]
         assert set(schema["required"]) == {"account_number"}
@@ -294,8 +347,55 @@ class TestToolInputSchemas:
 
     async def test_no_tool_has_constraining_output_schema(self):
         # Pins the LOCKED decision: `-> object` means FastMCP emits NO output
-        # schema, so raw JSON of any shape (e.g. list_accounts' array) passes
-        # through unvalidated. A future annotation like `-> dict` would emit a
-        # constraining schema and break list-shaped responses at runtime.
+        # schema, so JSON of any shape (raw Schwab objects, or the envelope
+        # dicts of the two list-shaped tools) passes through unvalidated. A
+        # future annotation like `-> dict` would emit a constraining schema
+        # and validate/reshape responses at runtime.
         for tool in await server.mcp.list_tools():
             assert tool.outputSchema is None, tool.name
+
+
+# One realistic (arguments, raw-client-return) pair per tool, for the
+# one-content-block pin below. The raw values mirror each Schwab endpoint's
+# top-level shape: arrays for accounts/transactions (multi-element, so an
+# unwrapped list would explode into several blocks), objects for the rest.
+ONE_BLOCK_CASES = {
+    "list_accounts": ({}, [{"acct": "1"}, {"acct": "2"}]),
+    "get_account": ({"account_number": "ACC"}, {"acct": "1"}),
+    "get_transactions": (
+        {"account_number": "ACC", "start_date": "s", "end_date": "e"},
+        [{"txn": "1"}, {"txn": "2"}],
+    ),
+    "get_quotes": ({"symbols": ["AAPL"]}, {"AAPL": {"quote": {}}}),
+    "get_price_history": (
+        {
+            "symbol": "AAPL",
+            "period_type": "day",
+            "period": 1,
+            "frequency_type": "minute",
+            "frequency": 5,
+        },
+        {"candles": [], "symbol": "AAPL"},
+    ),
+}
+
+
+class TestOneContentBlockPerTool:
+    # The MCP-serialization regression the envelopes exist to prevent: FastMCP
+    # converts a top-level list result into one TextContent block PER element,
+    # and a naive client reads only the first block. Exercise the REAL
+    # conversion layer (mcp.call_tool runs convert_result) for every tool and
+    # pin exactly ONE content block each.
+
+    def test_cases_cover_tool_surface_exactly(self):
+        # A future tool can't ship without a one-block case here.
+        assert set(ONE_BLOCK_CASES) == EXPECTED_TOOLS
+
+    @pytest.mark.parametrize("name", sorted(ONE_BLOCK_CASES))
+    async def test_tool_result_serializes_to_one_content_block(self, name):
+        arguments, raw = ONE_BLOCK_CASES[name]
+        ctx, fake = _patched_client()
+        getattr(fake, name).return_value = raw
+        with ctx:
+            blocks = await server.mcp.call_tool(name, arguments)
+        assert len(blocks) == 1
