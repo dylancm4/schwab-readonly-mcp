@@ -121,7 +121,23 @@ Add this to `.mcp.json` in the project where you want the tools available:
 
 The `${VAR}` references are expanded by Claude Code from your shell environment at launch. **Never paste the literal credential values into `.mcp.json` or any other file that can be committed** — keep them in the shell environment only (`.mcp.json` is conventionally checked in, which is exactly how an app secret ends up in a repo).
 
-Alternatively, register it from the command line — but note this is *not* equivalent: your shell expands `"${SCHWAB_CLIENT_ID}"` at `add` time, so the literal values are written into `~/.claude.json` in your home directory (outside any repo, but plaintext on disk; Claude Code documents `${VAR}` expansion only for `.mcp.json`, so prefer the `.mcp.json` form above, which stores only the references):
+To make those exports permanent without writing the values into a dotfile, store both in the Keychain — the same place the OAuth tokens live. Each command prompts for the value, so it never enters your shell history:
+
+```bash
+security add-generic-password -a "$USER" -s schwab-client-id -w
+security add-generic-password -a "$USER" -s schwab-client-secret -w
+```
+
+Then have `~/.zshrc` read them back on every new shell (if a lookup fails the variable is exported empty; the server refuses to start on an empty value, with a clear error):
+
+```zsh
+export SCHWAB_CLIENT_ID="$(security find-generic-password -s schwab-client-id -w 2>/dev/null)"
+export SCHWAB_CLIENT_SECRET="$(security find-generic-password -s schwab-client-secret -w 2>/dev/null)"
+```
+
+Apps that resolve your login shell's environment at launch (VS Code does — it runs your shell once at startup and caches the result) need a full restart, not a window reload, after adding these lines; GUI apps that never do this will not see the variables at all.
+
+Instead of `.mcp.json`, you can register the server from the command line — but note this is *not* equivalent: your shell expands `"${SCHWAB_CLIENT_ID}"` at `add` time, so the literal values are written into `~/.claude.json` in your home directory (outside any repo, but plaintext on disk; Claude Code documents `${VAR}` expansion only for `.mcp.json`, so prefer the `.mcp.json` form above, which stores only the references):
 
 ```bash
 claude mcp add schwab-readonly \
